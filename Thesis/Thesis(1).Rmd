@@ -1,0 +1,881 @@
+---
+title: "Thesis"
+output: html_document
+date: "2024-01-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+setwd('~/Downloads')
+
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(gridExtra)
+library(minpack.lm)
+```
+
+```{r}
+#Read Data
+df <- read.csv('AgreementScoresAll_Jul2023.csv')
+df <- drop_na(df, IdealPointAll.x, NVotesAll.x, IdealPointAll.y, NVotesAll.y, IdealPointDistance)
+df1 <- read.csv('IdealpointestimatesAll_Jul2023.csv')
+df2 <- read.csv('UNVotes.csv')
+```
+
+```{r}
+summary(df)
+```
+
+```{r}
+summary(df1) 
+```
+
+```{r}
+summary(df2)
+```
+
+
+```{r}
+df_us_china <- filter(df, ccode1 == 365, ccode2 == 2)
+
+summary(df_us_china)
+
+ggplot(data = df_us_china, aes(x = year, y = -IdealPointDistance)) + geom_point() + geom_smooth() + labs(title = 'Ideal Point Distance Trend of US vs China Over Time', x = 'Year', y = 'Ideal Point Distance')
+
+ggplot(data = df_us_china, aes(x = year, y = agree)) + geom_point() + geom_smooth () + labs(title = "Agreement score (S-score) Trend of US vs China Over Time", x = 'Year', y = 'Agreement Score')
+```
+
+```{r}
+df_us_x <- filter(df, ccode1 == 770, ccode2 == 2)
+
+summary(df_us_x)
+
+plot1 <- ggplot(data = df_us_x, aes(x = year, y = IdealPointDistance)) + geom_point() + geom_smooth() + labs(title = 'Ideal Point Distance Trend of US vs X Over Time', x = 'Year', y = 'Ideal Point Distance')
+
+df_china_x <- filter(df, ccode1 == 770, ccode2 == 710)
+
+plot2 <- ggplot(data = df_china_x, aes(x = year, y = IdealPointDistance)) + geom_point() + geom_smooth() + labs(title = 'Ideal Point Distance Trend of China vs X Over Time', x = 'Year', y = 'Ideal Point Distance')
+
+df_russia_x <- filter(df, ccode1 == 770, ccode2 == 365)
+
+plotrussia <- ggplot(data = df_russia_x, aes(x = year, y = IdealPointDistance)) + geom_point() + geom_smooth() + labs(title = 'Ideal Point Distance Trend of Russia vs X Over Time', x = 'Year', y = 'Ideal Point Distance')
+
+grid.arrange(plot1, plot2, plotrussia, nrow = 3)
+```
+
+```{r}
+lst_poor_coutries <- c(31, 40, 41, 42, 51, 52, 53, 54, 55, 56, 80, 90, 91, 92, 93, 94, 95, 100, 101, 110, 115, 130, 135, 57, 58, 60, 94, 95, 100, 110, 115, 145, 165, 155, 339, 402, 403, 404, 411, 420, 432, 433, 434, 435, 436, 437, 438, 439, 450, 451, 452, 461, 471, 475, 481, 482, 483, 484, 490, 500, 501, 510, 511, 516, 517, 520, 522, 530, 531, 540, 541, 551, 552, 553, 565, 570, 571, 572, 580, 581, 590, 591, 620, 625, 626, 645, 652, 660, 663, 679, 692, 698, 700, 701, 702, 703, 704, 705, 712, 731, 760, 771, 775, 780, 781, 790, 800, 811, 812, 816, 835, 860, 910, 935, 940, 946, 947, 950, 955, 970, 986, 990)
+lst_small_and_poor <- c(31, 40, 41, 42, 51, 52, 53, 54, 55, 56, 80, 90, 91, 92, 93, 94, 95, 110, 115, 57, 58, 60, 94, 95, 100, 110, 115, 145, 165, 155, 339, 402, 403, 404, 411, 420, 433, 434, 436, 437, 438, 439, 450, 451, 452, 461, 471, 481, 482, 484, 490, 500, 511, 516, 517, 520, 522, 531, 541, 551, 552, 553, 565, 570, 571, 572, 580, 581, 591, 620, 652, 660, 663, 679, 692, 698, 700, 701, 702, 703, 704, 731, 760, 775, 780, 781, 790, 800, 811, 812, 816, 835, 860, 910, 935, 940, 946, 947, 950, 955, 970, 986, 990)
+lst_rich <- c(20, 70, 140, 160, 200, 205, 210, 211, 212, 220, 221, 223, 225, 230, 235, 255, 290, 305, 310, 316, 317, 325, 327, 341, 344, 345, 346, 349, 350, 355, 359, 365, 366, 367, 368, 369, 370, 371, 372, 373, 375, 380, 385, 390, 395, 560, 600, 615, 616, 630, 640, 651, 666, 670, 690, 694, 696, 710, 713, 732, 740, 750, 770, 820, 830, 840, 850, 900, 920)
+
+#US ideal distances with poor countries
+df_us_ideal_poor <- group_by(df, year) %>%
+  filter(ccode1 == 2, ccode2 %in% lst_poor_coutries) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_us_ideal_poor <- group_by(df_us_ideal_poor, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_us_ideal_poor <- unique(df_us_ideal_poor) %>%
+  arrange(year)
+
+plot3 <- ggplot(df_us_ideal_poor, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#US ideal distances with countries that are small and poor
+df_us_ideal_small_poor <- group_by(df, year) %>%
+  filter(ccode1 == 2, ccode2 %in% lst_small_and_poor) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_us_ideal_small_poor <- group_by(df_us_ideal_small_poor, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_us_ideal_small_poor <- unique(df_us_ideal_small_poor) %>%
+  arrange(year)
+
+plot4 <- ggplot(df_us_ideal_small_poor, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#US ideal distances with rich countries
+df_us_ideal_rich <- group_by(df, year) %>%
+  filter(ccode1 == 2, ccode2 %in% lst_rich) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_us_ideal_rich <- group_by(df_us_ideal_rich, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_us_ideal_rich <- unique(df_us_ideal_rich) %>%
+  arrange(year)
+
+plot5 <- ggplot(df_us_ideal_rich, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Average US ideal distance change over time with all other countries
+df_us_ideal_avg <- group_by(df, year) %>%
+  filter(ccode1 == 2) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_us_ideal_avg <- group_by(df_us_ideal_avg, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_us_ideal_avg <- unique(df_us_ideal_avg) %>%
+  arrange(year)
+
+plot6 <- ggplot(df_us_ideal_avg, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Output plots
+grid.arrange(plot3, plot4, plot5, plot6, nrow = 4)
+
+```
+
+
+```{r}
+#China ideal distances with poor countries
+df_china_ideal_poor <- group_by(df, year) %>%
+  filter(ccode1 == 710, ccode2 %in% lst_poor_coutries) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_china_ideal_poor <- group_by(df_china_ideal_poor, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_china_idea1_poor <- unique(df_china_ideal_poor) %>%
+  arrange(year)
+
+plot7 <- ggplot(df_china_ideal_poor, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#China ideal distances with countries that are both small and poor
+df_china_ideal_small_poor <- group_by(df, year) %>%
+  filter(ccode1 == 710, ccode2 %in% lst_small_and_poor) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_china_ideal_small_poor <- group_by(df_china_ideal_small_poor, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_china_idea1_small_poor <- unique(df_china_ideal_small_poor) %>%
+  arrange(year)
+
+plot8 <- ggplot(df_china_ideal_small_poor, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#China ideal distances with rich countries
+df_china_ideal_rich <- group_by(df, year) %>%
+  filter(ccode1 == 710, ccode2 %in% lst_rich) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_china_ideal_rich <- group_by(df_china_ideal_rich, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_china_ideal_rich <- unique(df_china_ideal_rich) %>%
+  arrange(year)
+
+plot9 <- ggplot(df_china_ideal_rich, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Average China ideal distance change over time with all other countries
+df_china_ideal_avg <- group_by(df, year) %>%
+  filter(ccode1 == 710) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_china_ideal_avg <- group_by(df_china_ideal_avg, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_china_ideal_avg <- unique(df_china_ideal_avg) %>%
+  arrange(year)
+
+plot10 <- ggplot(df_china_ideal_avg, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Output plots
+grid.arrange(plot7, plot8, plot9, plot10, nrow = 4)
+
+#Jeff bergstrand
+
+```
+```{r}
+#Russia ideal distances with poor countries
+df_russia_ideal_poor <- group_by(df, year) %>%
+  filter(ccode1 == 365, ccode2 %in% lst_poor_coutries) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_russia_ideal_poor <- group_by(df_russia_ideal_poor, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_russia_ideal_poor <- unique(df_russia_ideal_poor) %>%
+  arrange(year)
+
+plot11 <- ggplot(df_russia_ideal_poor, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Russia ideal distances with countries that are both small and poor
+df_russia_ideal_small_poor <- group_by(df, year) %>%
+  filter(ccode1 == 365, ccode2 %in% lst_small_and_poor) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_russia_ideal_small_poor <- group_by(df_russia_ideal_small_poor, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_russia_idea1_small_poor <- unique(df_russia_ideal_small_poor) %>%
+  arrange(year)
+
+plot12 <- ggplot(df_russia_ideal_small_poor, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Russia ideal distances with rich countries
+df_russia_ideal_rich <- group_by(df, year) %>%
+  filter(ccode1 == 365, ccode2 %in% lst_rich) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_russia_ideal_rich <- group_by(df_russia_ideal_rich, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_russia_ideal_rich <- unique(df_russia_ideal_rich) %>%
+  arrange(year)
+
+plot13 <- ggplot(df_russia_ideal_rich, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Average Russia ideal distance change over time with all other countries
+df_russia_ideal_avg <- group_by(df, year) %>%
+  filter(ccode1 == 365) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_russia_ideal_avg <- group_by(df_russia_ideal_avg, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_russia_ideal_avg <- unique(df_russia_ideal_avg) %>%
+  arrange(year)
+
+plot14 <- ggplot(df_russia_ideal_avg, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Output plots
+grid.arrange(plot11, plot12, plot13, plot14, nrow = 4)
+```
+
+
+
+
+```{r}
+#Average US ideal distance change over time with selected countries
+lst_close <- c(20, 42, 140, 160, 165, 211, 560, 640, 900, 920) # These are countries that had an ideal point distance close to the US in 1946 (<= 0.2) and the objective is to observe how their voting preferences have changed over time. These countries also had an ideal point distance far from Russia (>= 2) in 1946. 
+df_us_ideal_avg <- group_by(df, year) %>%
+  filter(ccode1 == 2, ccode2 %in% lst_close) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_us_ideal_avg <- group_by(df_us_ideal_avg, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_us_ideal_avg <- unique(df_us_ideal_avg) %>%
+  arrange(year)
+
+plot15 <- ggplot(df_us_ideal_avg, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Average China ideal distance change over time with selected countries
+df_china_ideal_avg <- group_by(df, year) %>%
+  filter(ccode1 == 710, ccode2 %in% lst_close) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_china_ideal_avg <- group_by(df_china_ideal_avg, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_china_ideal_avg <- unique(df_china_ideal_avg) %>%
+  arrange(year)
+
+plot16 <- ggplot(df_china_ideal_avg, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Average Russia ideal distance change over time with selected countries
+df_russia_ideal_avg <- group_by(df, year) %>%
+  filter(ccode1 == 365, ccode2 %in% lst_close) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_russia_ideal_avg <- group_by(df_russia_ideal_avg, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_russia_ideal_avg <- unique(df_russia_ideal_avg) %>%
+  arrange(year)
+
+plot17 <- ggplot(df_russia_ideal_avg, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Output plots
+grid.arrange(plot15, plot16, plot17, nrow = 2)
+
+#Regression to test significance
+reg_us <- lm(ideal_distance ~ year, data = df_us_ideal_avg)
+summary(reg_us)
+reg_china <- lm(ideal_distance ~ year, data = df_china_ideal_avg)
+summary(reg_china)
+reg_russia <- lm(ideal_distance ~ year, data = df_russia_ideal_avg)
+summary(reg_russia)
+```
+
+
+
+```{r}
+#Average China ideal distance change over time with selected countries
+lst_close1 <- c(2, 20, 94, 145, 165, 200, 210, 211, 212, 220, 235, 325, 553, 560, 570, 572, 666, 900, 920) # These are countries that had an ideal point distance far from China in 1971 (>= 2) and the objective is to observe how their voting preferences have changed over time. 
+df_china_ideal_avg <- group_by(df, year) %>%
+  filter(ccode1 == 710, ccode2 %in% lst_close1) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_china_ideal_avg <- group_by(df_china_ideal_avg, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_china_ideal_avg <- unique(df_china_ideal_avg) %>%
+  arrange(year)
+
+plot18 <- ggplot(df_china_ideal_avg, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Average US ideal distance change over time with selected countries
+df_us_ideal_avg <- group_by(df, year) %>%
+  filter(ccode1 == 2, ccode2 %in% lst_close1) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_us_ideal_avg <- group_by(df_us_ideal_avg, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_us_ideal_avg <- unique(df_us_ideal_avg) %>%
+  arrange(year)
+
+plot19 <- ggplot(df_us_ideal_avg, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+
+#Average Russia ideal distance change over time with selected countries
+df_russia_ideal_avg <- group_by(df, year) %>%
+  filter(ccode1 == 365, ccode2 %in% lst_close1) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_russia_ideal_avg <- group_by(df_russia_ideal_avg, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_russia_ideal_avg <- unique(df_russia_ideal_avg) %>%
+  arrange(year)
+
+plot20 <- ggplot(df_russia_ideal_avg, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+#Output plots
+grid.arrange(plot18, plot19, plot20, nrow = 2)
+
+```
+
+```{r}
+#For Reference
+
+
+#Average US ideal distance change over time with all other countries
+df_us_ideal_avg <- group_by(df, year) %>%
+  filter(ccode1 == 2) %>%
+  mutate(ideal_distance = mean(IdealPointDistance))
+
+df_us_ideal_avg <- group_by(df_us_ideal_avg, ideal_distance) %>%
+  summarise(year, ideal_distance) %>%
+  drop_na()
+
+df_us_ideal_avg <- unique(df_us_ideal_avg) %>%
+  arrange(year)
+
+ggplot(df_us_ideal_avg, aes(x = year, y = ideal_distance)) + geom_point() + geom_smooth()
+
+summary(lm(ideal_distance ~ year, df_us_ideal_avg))
+
+```
+
+```{r}
+library(readxl)
+library(countrycode)
+Trade_data <- read_excel("~/Downloads/EIA Data Web Folder - 195 Countries - Files July 31 2021 EXTERNAL/EIA Database July 31 2021 (with links).xlsm", sheet = "Data Sheet")
+Trade_data <- Trade_data %>%
+  mutate(across(everything(), ~ gsub("Czechoslovachia", "Czechoslovakia", .)))
+
+exclude_list <- c(
+  "Aruba", "Bermuda", "Cayman Islands", "Faeroe Islands", "Greenland",
+  "Hong Kong", "Macao, China", "Micronesia", "Netherlands Antilles", "New Caledonia")
+Trade_data <- Trade_data %>%
+  filter(!(Exporter %in% exclude_list) & !(Importer %in% exclude_list))
+```
+
+
+```{r}
+#Difference in Means (Used in Proposal)
+
+#Convert columns 11 to 78 to numeric using lapply
+Trade_data[, 11:78] <- lapply(Trade_data[, 11:78], as.numeric)
+
+Trade_data <- Trade_data %>%
+  filter(Exporter == 'Russia')
+
+Trade_data <- Trade_data[c("Exporter", "Importer", 2010)]
+
+Trade_data <- Trade_data %>%
+  filter(`2010` %in% c(2,3))
+ 
+trade_list <- as.list(Trade_data$Importer)
+trade_list = countrycode(as.character(trade_list), "country.name", "cown")
+
+df_filter <- df %>%
+  filter(ccode1 == 365, year == 2010, ccode2 %in% trade_list)
+
+mean(df_filter$IdealPointDistance) #Russia: 0.828, 0.842 (2015); US: 2.645, China: 0.441
+
+df_filter <- df %>%
+  filter(ccode1 == 365, year == 2010, !(ccode2 %in% trade_list))
+
+mean(df_filter$IdealPointDistance) #Russia: 0.768, 0.850 (2015); US: 2.688, China: 0.898
+```
+
+
+```{r}
+#Convert columns 11 to 78 to numeric using lapply
+Trade_data[, 11:78] <- lapply(Trade_data[, 11:78], as.numeric)
+
+year_index = c()
+trade.country = c() #Countries that had a trade agreement with the US at some point
+nontrade.country = c() #Countries that never had a trade agreement with the US
+Trade_or_not = 0
+
+#Filter to only look at USA
+#Trade_data <- Trade_data %>%
+ # mutate(Exporter = countrycode(Exporter, "country.name", "cown"),
+ # Importer = countrycode(Importer, "country.name", "cown"))
+  
+Trade_data <- Trade_data %>%
+  filter(Exporter == 'Japan')
+
+#Run loop to record Trade/Nontrade
+for (i in 1:nrow(Trade_data)) {
+  Trade_or_not = 0
+  for (j in 12:ncol(Trade_data)) {
+    if (!is.na(Trade_data[i, j]) && !is.na(Trade_data[i, j - 1])) {
+      if (Trade_data[i, j] %in% c(2,3) && Trade_data[i, j - 1] %in% c(0,1)) {
+        trade.country = c(trade.country, Trade_data[i, 4])
+        year_index = c(year_index, colnames(Trade_data)[j])
+        Trade_or_not = 1
+      }
+    }
+  }
+   if (Trade_or_not == 0){
+      nontrade.country = c(nontrade.country, Trade_data[i, 4])
+    }
+}
+
+
+year_index
+
+trade.country <- as.character(trade.country)
+trade.country
+trade.country <- na.omit(countrycode(trade.country, "country.name", "cown"))
+trade.country
+
+
+nontrade.country <- as.character(nontrade.country)
+nontrade.country <- na.omit(countrycode(nontrade.country, "country.name", "cown"))
+nontrade.country
+
+
+
+# Create countries that have had a trade agreement with the US
+trade.pairs <- paste(year_index, trade.country, sep = "-")
+
+# Print the result
+print(trade.pairs)
+```
+
+```{r} 
+#Trade Event Analysis
+
+#Function to perform regression and extract coefficients and p-values
+event_regression <- function(data) {
+  reg <- lm(IdealPointDistance ~ year + ta_dummy + ta_dummy * year, data)
+  summary_model <- summary(reg)
+  coefficients <- coef(summary_model)[-1, "Estimate", drop = FALSE]  # Exclude intercept
+  p_values <- summary_model$coefficients[-1, "Pr(>|t|)"]
+  int_p <- summary_model$coefficients["year:ta_dummy", "Pr(>|t|)"]
+  return(list(coefficients = coefficients, p_values = p_values, int_p = int_p))
+}
+
+#Initialize
+coefficients_for_year_trade <- numeric(0)
+coefficients_for_dummy_trade <- numeric(0)
+coefficients_for_int_trade <- numeric(0)
+total_pvalues_trade <- numeric(0)
+int_p_trade <- numeric(0)
+
+
+
+#Loop
+for (i in 1:length(trade.country)) {
+  df_new <- df %>%
+    filter(ccode1 == 710, ccode2 == trade.country[i]) %>%
+    filter(year >= as.numeric(year_index[i]) - 13 & year <= as.numeric(year_index[i]) + 13) %>%
+    mutate(ta_dummy = ifelse(year < as.numeric(year_index[i]), 0, 1))
+
+  df_new <- df_new %>%
+    group_by(year, IdealPointDistance) %>%
+    summarise(ta_dummy = first(ta_dummy), .groups = 'drop') %>%
+    ungroup() %>%
+    arrange(year)
+
+  # Perform regression
+  result <- event_regression(df_new)
+
+  # Extract coefficients and p-values
+  coefficients_for_year_trade <- c(coefficients_for_year_trade, result$coefficients["year", , drop = FALSE])
+  
+  coefficients_for_dummy_trade <- c(coefficients_for_dummy_trade, result$coefficients["ta_dummy", , drop = FALSE])
+  
+  coefficients_for_int_trade <- c(coefficients_for_int_trade, result$coefficients["year:ta_dummy", , drop = FALSE])
+  
+  total_pvalues_trade <- c(total_pvalues_trade, result$p_values)
+  
+  int_p_trade <- c(int_p_trade, result$int_p)
+}
+
+# Print the results
+print("Coefficients for year:")
+print(coefficients_for_year_trade)
+
+print("Coefficients for dummy variable:")
+print(coefficients_for_dummy_trade)
+
+print("Coefficients for interaction term:")
+print(coefficients_for_int_trade)
+
+print("Total p-values:")
+print(total_pvalues_trade)
+
+print("Interaction p-values:")
+print(int_p_trade)
+```
+
+```{r}
+#NonTrade Event Analysis
+
+#Note: This analysis looks at countries that NEVER had a trading agreement with the US for a time period of 26 years centered by the signing of the Trade Agreement with each particular trading country. NOT all other countries that didn't have a trade signing at the given time period. 
+
+#Function to perform regression and extract coefficients and p-values
+event_regression_nontrade <- function(data) {
+  reg <- lm(ideal_distance ~ year, data = data)
+  summary_model <- summary(reg)
+  coefs <- summary_model$coefficients["year", "Estimate"]
+  p_values <- summary_model$coefficients["year", "Pr(>|t|)"]
+  return(list(coefs = coefs, p_values = p_values))
+}
+
+#Initialize
+coefficients_for_year_nontrade <- numeric(0)
+pvalues_nontrade <- numeric(0)
+
+#Loop
+for (i in 1:length(trade.country)){
+  
+  df_new1 <- group_by(df,year) %>%
+    filter(ccode1 == 710, ccode2 %in% nontrade.country) %>%
+    filter(year >= as.numeric(year_index[i]) - 13 & year <= as.numeric(year_index[i]) + 13) %>%
+    mutate(ideal_distance = mean(IdealPointDistance)) #Take the ideal distance mean of all nontrading countries in a given year
+  
+  df_new1 <- df_new1 %>%
+    group_by(ideal_distance, year) %>%
+    summarise(.groups = 'drop') %>%
+    ungroup() %>%
+    arrange(year)
+  
+# Perform regression
+  result <- event_regression_nontrade(df_new1)
+
+  # Extract coefficients and p-values
+  coefficients_for_year_nontrade <- c(coefficients_for_year_nontrade, result$coefs)
+  
+  pvalues_nontrade <- c(pvalues_nontrade, result$p_values)
+  
+}
+
+# Print the results
+print("Coefficients for year:")
+print(coefficients_for_year_nontrade)
+
+print("P-values:")
+print(pvalues_nontrade)
+
+
+#Test if there's significant difference in the coefs of the two analyses. 
+t.test(coefficients_for_year_trade, coefficients_for_year_nontrade)
+
+
+
+```
+
+```{r}
+#Two way fixed effect 
+library(fixest)
+df <- read.csv('AgreementScoresAll_Jul2023.csv')
+df <- drop_na(df, IdealPointAll.x, NVotesAll.x, IdealPointAll.y, NVotesAll.y, IdealPointDistance)
+
+all_countries = c()
+
+# Create dataframe df_fe with ta_dummy
+df$ta_dummy <- 0
+
+for (i in 1:length(trade.country)) {
+  df$ta_dummy <- ifelse(df$ccode1 == 2 & df$ccode2 == trade.country[i] & df$year >= as.numeric(year_index[i]), 1, df$ta_dummy)
+}
+
+df_fe <- df %>%
+  filter(ccode1 == 2)
+
+fe_reg <- feols(IdealPointDistance ~ ta_dummy + year | ccode2, data = df_fe) #If country is not fixed, then the estimate becomes negative as opposed to positive
+
+summary(fe_reg)
+```
+
+```{r}
+#Centering year
+df_trade_countries <- df %>%
+  filter(ccode1 == 2 & ccode2 %in% trade.country & ta_dummy == 1) %>%
+  group_by(ccode2) %>%
+  summarize(trade_agreement_year = min(year))
+
+df_trade_years <- df %>%
+  left_join(df_trade_countries)
+
+df_trade_years$trade_agreement_year <- ifelse(df_trade_years$ccode1 != 2, NA, df_trade_years$trade_agreement_year)
+
+#Set trade agreement year to be 0
+df_trade_years$centered_year <- df_trade_years$year - df_trade_years$trade_agreement_year
+
+
+#Plot Visualization
+trade.list = c()
+nontrade.list = c()
+
+
+#Create trade.list values
+df_trade_years <- df %>%
+  filter(ccode1 == 740)
+
+tv_test <- df_trade_years %>%
+  filter(centered_year == 13) %>%
+  mutate(IdealPointDistance = mean(IdealPointDistance))
+
+for(i in -13:13){
+  df_trade_years_copy <- df_trade_years
+  
+  filtered_data <- df_trade_years_copy %>%
+  filter(centered_year == i)
+  
+  trade.list[i+14] <- mean(filtered_data$IdealPointDistance)
+}
+  
+trade.list
+
+
+
+#Create nontrade.list values
+for(i in -13:13){
+  count = 0
+  df_trade_years_copy <- df_trade_years
+  filtered_data <- df_trade_years_copy %>%
+  filter(centered_year == i)
+  
+  unique_years <- unique(filtered_data$year)
+  
+for(j in 1:length(unique_years)){
+  
+ filtered_data_nontrade <- df_trade_years_copy %>%
+    filter(year == unique_years[j] & ccode2 %in% nontrade.country) %>%
+  summarize(IdealPointDistance = mean(IdealPointDistance))
+ 
+ count = count + filtered_data_nontrade$IdealPointDistance
+}
+  nontrade.list[i+14] <- count/(length(unique_years))
+}
+
+nontrade.list
+
+#Making dataframes and plots
+
+plot_df <- data.frame(x = -13:13, y1 = trade.list, y2 = nontrade.list)
+plot_df_trade <- data.frame(x = -13:13, y = trade.list)
+plot_df_nontrade <- data.frame(x = -13:13, y = nontrade.list)
+plot_df1 <- data.frame(x = -13:13, y = nontrade.list-trade.list)
+
+
+ggplot(plot_df, aes(x = x)) +
+  geom_line(aes(y = y1, color = 'Trading Partners')) +
+  geom_line(aes(y = y2, color = 'Non-trading Countries')) +
+  scale_color_manual(values = c('Trading Partners' = 'blue', 'Non-trading Countries' = 'red')) +
+  theme_minimal() +
+  labs(x = "Centered Year", y = "Ideal Point Distance", title = "Comparison Plot") +
+  theme(legend.title = element_blank())
+
+
+ggplot(plot_df1, aes(x = x))+ geom_line(aes(y = y), color = 'blue') + labs(x = "Centered Year", y = "Difference in Ideal Convergence", title = "How PTA's Effect on Ideal Point Distance Fluctuates")
+
+lm.fit.trade = lm(y ~ x, plot_df_trade)
+summary(lm.fit.trade)
+lm.fit.nontrade = lm(y ~ x, plot_df_nontrade)
+summary(lm.fit.nontrade)
+
+
+```
+
+```{r}
+#With EU
+
+eu_membership <- list(
+  "1957" = c("Belgium", "France", "Germany", "Italy", "Luxembourg", "Netherlands"),
+  "1973" = c("Denmark", "Ireland", "UK"),
+  "1981" = c("Greece"), 
+  "1986" = c("Portugal", "Spain"), 
+  "1995" = c("Austria", "Finland", "Sweden"), 
+  "2004" = c("Cyprus", "Czech Republic", "Estonia", "Hungary", "Latvia", "Lithuania", "Malta", "Poland", "Slovak Republic", "Slovenia"),
+  "2007" = c("Bulgaria", "Romania"),  
+  "2013" = c("Croatia"))
+
+# Function to get EU members for a given year
+get_eu_members <- function(year) {
+  members <- c()
+  for (y in names(eu_membership)) {
+    if (as.numeric(y) <= year) {
+      members <- c(members, eu_membership[[y]])
+    }
+  }
+  return(unique(members))
+}
+
+
+Trade_data_long <- Trade_data %>%
+  pivot_longer(cols = 12:ncol(Trade_data), names_to = "year", values_to = "Trade_Value") %>%
+  mutate(year = as.numeric(year))
+
+# Create a dummy column to indicate if the exporter is an EU member in a given year
+Trade_data_long <- Trade_data_long %>%
+  rowwise() %>%
+  mutate(is_eu_member_exporter = Exporter %in% get_eu_members(year)) %>%
+  mutate(is_eu_member_importer = Importer %in% get_eu_members(year)) %>%
+  ungroup()
+
+# Filter rows where the Exporter is an EU member
+Trade_data_long <- Trade_data_long %>%
+  filter(is_eu_member_exporter) %>%
+  filter(is_eu_member_importer == FALSE)
+
+# Initialize vectors to store results
+trade.country <- c()
+nontrade.country <- c()
+trade_pairs <- data.frame(Importer = character(), year = numeric(), stringsAsFactors = FALSE)
+
+# Create Trade_or_not column to identify trade agreements
+Trade_data_long <- Trade_data_long %>%
+  arrange(Exporter, year) %>%
+  group_by(Exporter) %>%
+  mutate(Trade_or_not = ifelse(Trade_Value %in% c(2, 3) & lag(Trade_Value) %in% c(0, 1), 1, 0)) %>%
+  ungroup()
+
+# Extract trade countries and their first trade agreement years
+trade_pairs <- Trade_data_long %>%
+  filter(Trade_or_not == 1) %>%
+  group_by(Importer) %>%
+  summarise(year = min(year)) %>%
+  ungroup()
+
+nontrade.country <- setdiff(unique(Trade_data_long$Importer), unique(trade_pairs$Importer))
+nontrade.country <- setdiff(nontrade.country, unique(unlist(eu_membership)))
+nontrade.country = countrycode(nontrade.country, "country.name", "cown")
+
+# Initialize lists
+trade.list <- numeric(27)
+nontrade.list <- numeric(27)
+
+# Filter data for EU members
+df_trade_years <- df %>%
+  filter(ccode1 %in% countrycode(unlist(lapply(df$year, get_eu_members)), "country.name", "cown"))
+
+# Create trade.list values
+for (i in -13:13) {
+  filtered_data <- df_trade_years %>%
+    filter(centered_year == i)
+  trade.list[i + 14] <- mean(filtered_data$IdealPointDistance, na.rm = TRUE)
+}
+
+# Create nontrade.list values
+for (i in -13:13) {
+  count <- 0
+  filtered_data <- df_trade_years %>%
+    filter(centered_year == i)
+  unique_years <- unique(filtered_data$year)
+  
+  for (j in unique_years) {
+    filtered_data_nontrade <- df_trade_years %>%
+      filter(year == j & ccode2 %in% nontrade.country) %>%
+      summarize(IdealPointDistance = mean(IdealPointDistance, na.rm = TRUE))
+    
+    count <- count + filtered_data_nontrade$IdealPointDistance
+  }
+  nontrade.list[i + 14] <- count / length(unique_years)
+}
+
+# Print results
+print(trade.list)
+print(nontrade.list)
+
+
+# Create data frames for plotting
+plot_df <- data.frame(x = -13:13, y1 = trade.list, y2 = nontrade.list)
+plot_df_trade <- data.frame(x = -13:13, y = trade.list)
+plot_df_nontrade <- data.frame(x = -13:13, y = nontrade.list)
+plot_df1 <- data.frame(x = -13:13, y = nontrade.list - trade.list)
+
+# Plot comparison of trading partners and non-trading countries
+ggplot(plot_df, aes(x = x)) +
+  geom_line(aes(y = y1, color = 'Trading Partners')) +
+  geom_line(aes(y = y2, color = 'Non-trading Countries')) +
+  scale_color_manual(values = c('Trading Partners' = 'blue', 'Non-trading Countries' = 'red')) +
+  theme_minimal() +
+  labs(x = "Centered Year", y = "Ideal Point Distance", title = "Comparison Plot") +
+  theme(legend.title = element_blank())
+
+# Plot difference in ideal convergence
+ggplot(plot_df1, aes(x = x)) +
+  geom_line(aes(y = y), color = 'blue') +
+  labs(x = "Centered Year", y = "Difference in Ideal Convergence", title = "How PTA's Effect on Ideal Point Distance Fluctuates")
+```
+
+
+
+
+
+
+```{r}
+#Generate random trade agreement year for non-trading countries
+df_trade_years_loop <- df_trade_years
+
+for(i in 1:1000) {
+  df_trade_years_loop <- df_trade_years %>%
+    filter(ccode1 == 2)
+  
+  df_trade_years_loop_non_trade <- df_trade_years_loop %>%
+    filter(ccode2 %in% nontrade.country & ccode1 == 2) %>%
+    group_by(ccode2) %>%
+    summarize(trade_agreement_year_rand = sample(1956:2012, size = 1))
+  
+  df_trade_years_loop <- df_trade_years_loop %>%
+    left_join(df_trade_years_loop_non_trade) %>%
+    filter(!is.na(trade_agreement_year) | !is.na(trade_agreement_year_rand))
+  
+  df_trade_years_loop$trade_agreement_year <- ifelse(is.na(df_trade_years_loop$trade_agreement_year),
+                                                     df_trade_years_loop$trade_agreement_year_rand,
+                                                     df_trade_years_loop$trade_agreement_year)
+  
+  df_trade_years_loop$year_centered <- df_trade_years_loop$year - df_trade_years_loop$trade_agreement_year
+
+}
+```

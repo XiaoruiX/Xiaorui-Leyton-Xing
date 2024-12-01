@@ -1,0 +1,757 @@
+---
+title: "Thesis.1"
+output: html_document
+date: "2024-05-18"
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+setwd('~/Downloads')
+
+library(tidyverse)
+library(tidylog)
+library(readxl)
+library(countrycode)
+library(dplyr)
+library(cepiigeodist)
+library(fixest)
+library(car)
+
+
+#Load df
+df <- read.csv('~/Downloads/AgreementScoresAll_Jul2023.csv')
+df <- drop_na(df, IdealPointAll.x, NVotesAll.x, IdealPointAll.y, NVotesAll.y, IdealPointDistance)
+
+df <- df %>%
+  mutate(country_pair = pmin(ccode1, ccode2), country_pair2 = pmax(ccode1, ccode2)) %>%
+  select(-ccode1, -ccode2) %>%
+  rename(ccode1 = country_pair, ccode2 = country_pair2) %>%
+  group_by(year, ccode1, ccode2) %>%
+  summarise(IdealPointDistance = mean(IdealPointDistance, na.rm = TRUE)) %>%
+  ungroup() %>%
+  select(ccode1, ccode2, year, IdealPointDistance) %>%
+  select(ccode2, everything()) %>%
+  select(ccode1, everything())
+
+#Load deflator
+deflator <- read.csv('~/Downloads/GDP Deflator.csv')
+
+deflator <- deflator %>%
+  select(Country.Name, Time.Period, Gross.Domestic.Product..Deflator..Index..NGDP_D_IX.) %>%
+  rename(year = Time.Period, deflator = Gross.Domestic.Product..Deflator..Index..NGDP_D_IX.) %>%
+  mutate(Country.Name =  countrycode(as.character(Country.Name), "country.name", "cown")) %>%
+  rename(ccode1 = Country.Name) %>%
+  filter(!is.na(ccode1) & !is.na(deflator), deflator != 0)
+
+
+#Load trade agreement data
+Trade_data <- read_excel("~/Downloads/EIA Data Web Folder - 195 Countries - Files July 31 2021 EXTERNAL/EIA Database July 31 2021 (with links).xlsm", sheet = "Data Sheet")
+Trade_data <- Trade_data %>%
+  mutate(across(everything(), ~ gsub("Czechoslovachia", "Czechoslovakia", .)))
+
+exclude_list <- c(
+  "Aruba", "Bermuda", "Cayman Islands", "Faeroe Islands", "Greenland",
+  "Hong Kong", "Macao, China", "Micronesia", "Netherlands Antilles", "New Caledonia")
+
+Trade_data <- Trade_data %>%
+  filter(!(Exporter %in% exclude_list) & !(Importer %in% exclude_list)) %>%
+  mutate(Importer = countrycode(as.character(Importer), "country.name", "cown")) %>%
+  rename(ccode2 = Importer) %>%
+  mutate(Exporter = countrycode(as.character(Exporter), "country.name", "cown")) %>%
+  rename(ccode1 = Exporter)
+```
+
+```{r}
+#Creating ta_dummy for df
+
+# Reshape Trade_data to long format
+Trade_data_long <- Trade_data %>%
+  pivot_longer(
+    cols = c(starts_with("19"), starts_with("20")),
+    names_to = "year",
+    values_to = "trade_agreement_value"
+  ) %>%
+  mutate(year = as.numeric(year), ta_dummy = ifelse(trade_agreement_value %in% c(2, 3), 1, 0)) %>%
+  dplyr::select(ccode1, ccode2, year, ta_dummy)
+
+
+df <- df %>%
+  left_join(Trade_data_long, by = c("ccode1", "ccode2", "year"))
+
+df$ta_dummy[is.na(df$ta_dummy)] <- 0
+
+
+
+#Setting ta_dummy to be 1 from 2018 to 2022 if it is 1 in 2017
+
+# Step 1: Identify country pairs with ta_dummy == 1 in 2017
+country_pairs_with_ta_in_2017 <- df %>%
+  filter(year == 2017, ta_dummy == 1) %>%
+  dplyr::select(ccode1, ccode2)
+country_pairs_with_ta_in_2017 <- country_pairs_with_ta_in_2017 %>%
+  mutate(pair_id = paste(ccode1, ccode2, sep = "-"))
+
+# Step 2: Update ta_dummy for the years 2018 to 2022 for these exact country pairs
+df <- df %>%
+  mutate(pair_id = paste(ccode1, ccode2, sep = "-")) %>%
+  mutate(ta_dummy = ifelse(pair_id %in% country_pairs_with_ta_in_2017$pair_id &
+                           year >= 2018 & year <= 2022, 1, ta_dummy)) %>%
+  dplyr::select(-pair_id)
+
+
+df_test <- df %>%
+  filter(ccode1 %in% c(2,70), ccode2 %in% c(2,70), year == 2022)
+```
+
+```{r}
+# Create the "centered year" column
+df <- df %>%
+  group_by(ccode1, ccode2) %>%
+  mutate(
+    first_ta_year = min(year[ta_dummy == 1], na.rm = TRUE),
+    centered_year = year - first_ta_year) %>%
+  ungroup() 
+# Note: If there are country pairs without any trade agreements (ta_dummy never equals 1),
+# 'first_ta_year' will be Inf, and 'centered_year' will be NA for those groups.
+# You may want to handle these cases depending on your specific needs.
+```
+```{r}
+GDP <- read_excel("~/Downloads/GDP.xlsx", sheet = "Data")
+
+GDP <- GDP %>%
+  mutate(country =  countrycode(as.character(country), "country.name", "cown")) %>%
+  select(country, year, pop, rgdpna) %>%
+  rename(GDP = rgdpna) %>%
+  mutate(GDP_per_capita = GDP/pop) %>%
+  filter(!is.na(country))
+```
+
+
+
+
+
+
+```{r}
+#Load GDP Data
+GDP <- read.csv('~/Downloads/GDP.csv')
+
+GDP <- GDP %>%
+  pivot_longer(
+    cols = starts_with("X"), # This selects all columns that start with 'X'
+    names_to = "year", # The name of the new column for years
+    names_prefix = "X", # Remove the 'X' prefix from the year column names
+    values_to = "GDP" # The name of the new column for deflator values
+  ) %>%
+  # Extract the year from the original column names and convert it to numeric
+  mutate(year = as.numeric(sub(".*YR(\\d{4})", "\\1", year))) %>%
+  select(-Series.Name, -Series.Code, -Country.Code)
+
+GDP <- GDP %>%
+  mutate(Country.Name =  countrycode(as.character(Country.Name), "country.name", "cown")) %>%
+  rename(ccode1 = Country.Name) %>%
+  mutate(GDP = as.numeric(na_if(GDP, ".."))) %>%
+  filter(!is.na(ccode1))
+
+GDP <- left_join(GDP, deflator, by = c("ccode1", "year")) %>%
+  filter(!is.na(deflator) & !is.na(GDP)) %>%
+  mutate(GDP = (GDP/deflator)*100)
+
+# Merge GDP data for ccode1
+df <- df %>%     
+  left_join(GDP, by = c("ccode1" = "country", "year")) %>%
+  rename(GDP1 = GDP) %>%
+  mutate(GDP1 = GDP1 * 1e+06)
+
+# Merge GDP data for ccode2
+df <- df %>%
+  left_join(GDP, by = c("ccode2" = "country", "year")) %>%
+  rename(GDP2 = GDP) %>%
+  mutate(GDP2 = GDP2 * 1e+06)
+
+# Calculate the difference in GDP
+df <- df %>%
+  mutate(GDP_diff = abs(GDP1 - GDP2), GDP_per_capita_diff = abs(GDP_per_capita.x - GDP_per_capita.y)) %>%
+  select(-pop.x, -pop.y)
+
+df1 <- df %>%
+  mutate(GDP_diff_proportionate = GDP_diff/(GDP1+GDP2))
+
+df_test <- df1 %>%
+  filter(year == 2000, ccode1 == 2, ccode2 == 710)
+```
+
+```{r}
+#Create trading partners values
+trade.list = c()
+trade.list.large = c()
+trade.list.small = c()
+trade.list.middle = c()
+
+df1 <- df1 %>%
+  filter(!is.na(GDP_diff))
+
+df_consolidated <- df1 %>%
+  mutate(country_pair = pmin(ccode1, ccode2),
+         country_pair_2 = pmax(ccode1, ccode2)) %>%
+  group_by(country_pair, country_pair_2, year) %>%
+  summarize(
+    IdealPointDistance = mean(IdealPointDistance),
+    ta_dummy = mean(ta_dummy),
+    first_ta_year = mean(first_ta_year),
+    centered_year = mean(centered_year),
+    GDP_diff_proportionate = mean(GDP_diff_proportionate),
+    .groups = 'drop'
+  ) %>%
+  mutate(ccode1 = country_pair,
+         ccode2 = country_pair_2) %>%
+  select(ccode1, ccode2, year, IdealPointDistance, ta_dummy, first_ta_year, centered_year, GDP_diff_proportionate)
+
+
+df_test <- df_consolidated %>%
+  filter(ccode1 %in% c(310,80), ccode2 %in% c(80,310))
+
+for(i in -13:13){
+  df_trade <- df_consolidated %>%
+  filter(centered_year == i)
+  trade.list[i+14] <- mean(df_trade$IdealPointDistance)
+}
+
+trade.list
+
+df_signing_year <- df_consolidated %>%
+  filter(centered_year == 0)
+
+percentiles <- quantile(df_signing_year$GDP_diff_proportionate, probs = c(0.2, 0.8), na.rm = TRUE)
+
+# Categorize the data into three groups based on GDP_diff
+df_large_diff <- df_signing_year %>%
+  filter(GDP_diff_proportionate > percentiles[2])
+
+df_small_diff <- df_signing_year %>%
+  filter(GDP_diff_proportionate < percentiles[1])
+
+df_middle_diff <- df_signing_year %>%
+  filter(GDP_diff_proportionate >= percentiles[1] & GDP_diff_proportionate <= percentiles[2])
+
+for(i in -13:13) {
+  trade.list.large[i + 14] <- mean(df_consolidated %>%
+    filter(centered_year == i) %>%
+    filter(paste(ccode1, ccode2) %in% paste(df_large_diff$ccode1, df_large_diff$ccode2)) %>%
+    pull(IdealPointDistance), na.rm = TRUE)
+  
+  trade.list.small[i + 14] <- mean(df_consolidated %>%
+    filter(centered_year == i) %>%
+    filter(paste(ccode1, ccode2) %in% paste(df_small_diff$ccode1, df_small_diff$ccode2)) %>%
+    pull(IdealPointDistance), na.rm = TRUE)
+  
+  # Filter for middle GDP_diff pairs and calculate the mean IdealPointDistance
+  trade.list.middle[i + 14] <- mean(df_consolidated %>%
+    filter(centered_year == i) %>%
+    filter(paste(ccode1, ccode2) %in% paste(df_middle_diff$ccode1, df_middle_diff$ccode2)) %>%
+    pull(IdealPointDistance), na.rm = TRUE)
+}
+
+
+trade.list.large
+trade.list.small
+trade.list.middle
+
+```
+
+```{r}
+#Create nontrading countries values
+nontrade.list = c()
+
+for(i in -13:13){
+  count = 0
+  df_nontrade <- df_consolidated %>%
+  filter(centered_year == i)
+  
+  unique_years <- unique(df_nontrade$year)
+  
+for(j in 1:length(unique_years)){
+
+ df_nontrade_filtered <- df_consolidated %>%
+   filter(year == unique_years[j] & is.infinite(first_ta_year)) %>%
+   summarize(IdealPointDistance = mean(IdealPointDistance))
+ 
+ count = count + df_nontrade_filtered$IdealPointDistance
+}
+  nontrade.list[i+14] <- count/(length(unique_years))
+}
+
+nontrade.list
+
+
+
+#Making dataframes and plots
+
+plot_df <- data.frame(x = -1:13, y1 = trade.list, y2 = nontrade.list, large = trade.list.large, small = trade.list.small, mid = trade.list.middle)
+plot_df_trade <- data.frame(x = -13:13, y = trade.list)
+plot_df_nontrade <- data.frame(x = -13:13, y = nontrade.list)
+plot_df1 <- data.frame(x = -13:13, y = nontrade.list-trade.list)
+
+
+ggplot(plot_df, aes(x = x)) +
+  geom_line(aes(y = y1, color = 'Trading Partners')) +
+  geom_line(aes(y = y2, color = 'Non-trading Countries')) + 
+  geom_line(aes(y = large, color = 'Trading Partners (Large GDP Diff)'), position = position_jitter(w = 0.1, h = 0)) +
+  geom_line(aes(y = small, color = 'Trading Partners (Small GDP Diff)')) +
+  geom_line(aes(y = mid, color = 'Trading Partners (Middle GDP Diff)')) +
+  scale_color_manual(values = c('Trading Partners' = 'blue', 'Non-trading Countries' = 'red', 'Trading Partners (Large GDP Diff)' = 'orange', 'Trading Partners (Small GDP Diff)' = 'green', 'Trade Partners (Middle GDP Diff)' = 'grey')) +
+  theme_minimal() +
+  labs(x = "Centered Year", y = "Ideal Point Distance", title = "Comparison Plot") +
+  theme(legend.title = element_blank())
+
+
+ggplot(plot_df1, aes(x = x))+ geom_line(aes(y = y), color = 'blue') + labs(x = "Centered Year", y = "Difference in Ideal Convergence", title = "How PTA's Effect on Ideal Point Distance Fluctuates")
+```
+
+```{r}
+#Trade Volume Data
+tv_data <- read.csv('~/Downloads/DOTS.csv')
+
+# Create a named vector with custom matches for ambiguous country names
+custom_matches <- c("Serbia, Rep. of" = "345")
+
+tv_data <- tv_data %>%
+  filter(!Country.Name %in% c("Advanced Economies", "Bermuda", "Emerging and Developing Economies"),
+         !Counterpart.Country.Name %in% c("Advanced Economies", "Bermuda", "Emerging and Developing Economies")) %>%
+  mutate(Country.Name = countrycode(as.character(Country.Name), "country.name", "cown", custom_match = custom_matches),
+         Counterpart.Country.Name = countrycode(as.character(Counterpart.Country.Name), "country.name", "cown", custom_match = custom_matches)) %>%
+  rename(ccode1 = Country.Name, ccode2 = Counterpart.Country.Name, year = Time.Period, Export = Goods..Value.of.Exports..Free.on.board..FOB...US.Dollars..TXG_FOB_USD., Import = Goods..Value.of.Imports..Cost..Insurance..Freight..CIF...US.Dollars..TMG_CIF_USD., 'Trade Balance' = Goods..Value.of.Trade.Balance..US.Dollars..TBG_USD.) %>%
+  select(-Country.Code, -Counterpart.Country.Code, -Status, -Status.1, -Status.2, -X, -Goods..Value.of.Imports..Free.on.board..FOB...US.Dollars..TMG_FOB_USD., -Status.3) %>% mutate(Total.Trade.Flow = ifelse(is.na(Export) & is.na(Import), NA,
+                                   coalesce(Export, 0) + coalesce(Import, 0)))
+
+tv_data$ccode1 <- as.numeric(tv_data$ccode1)
+tv_data$ccode2 <- as.numeric(tv_data$ccode2)
+
+tv_data <- left_join(tv_data, deflator, by = c("ccode1", "year")) %>%
+  filter(!is.na(deflator)) %>%
+  mutate(Total.Trade.Flow = Total.Trade.Flow/deflator*100)
+
+tv_data <- tv_data %>%
+  mutate(country_pair = pmin(ccode1, ccode2), country_pair2 = pmax(ccode1, ccode2)) %>%
+  select(-ccode1, -ccode2) %>%
+  rename(ccode1 = country_pair, ccode2 = country_pair2) %>%
+  group_by(year, ccode1, ccode2) %>%
+  summarise(Total.Trade.Flow = mean(Total.Trade.Flow, na.rm = TRUE)) %>%
+  ungroup() %>%
+  select(ccode2, everything()) %>%
+  select(ccode1, everything())
+  
+
+tv_test <- tv_data %>%
+  filter(ccode1 %in% c(2,365), ccode2 %in% c(2,365), year == 1992)
+```
+
+```{r}
+#Tracking the trade volumes of trading partners
+
+trading_volume_list = c()
+
+for (i in -13:13){
+df_filtered <- df %>%
+    filter(centered_year == i)
+
+df2 <- left_join(df_filtered, tv_data, by = c('ccode1','ccode2','year')) %>%
+  filter(!is.na(Total.Trade.Flow))
+
+df2 <- df2 %>%
+  summarize(average_Total_Trade_Flow = mean(Total.Trade.Flow, na.rm = TRUE)) %>%
+  pull(average_Total_Trade_Flow)
+
+  trading_volume_list <- c(trading_volume_list, df2)
+
+}
+trading_volume_list
+```
+
+```{r}
+#Tracking the trade volume of nontrading countries
+
+nontrading_volume_list = c()
+
+for(i in -13:13){
+  nontrading_df <- df %>%
+    filter(centered_year == i)
+  
+  unique_years <- unique(nontrading_df$year)
+  
+  df_filtered <- df %>%
+    filter(year %in% unique_years, is.infinite(first_ta_year))
+  
+  df2 <- left_join(df_filtered, tv_data, by = c('ccode1','ccode2','year')) %>%
+    filter(!is.na(Total.Trade.Flow))
+  
+  df2 <- df2 %>%
+  group_by(year) %>%
+  summarize(yearly_avg_trade_flow = mean(Total.Trade.Flow, na.rm = TRUE)) %>%
+  ungroup()
+
+  nontrading_volume_list <- c(nontrading_volume_list, mean(df2$yearly_avg_trade_flow))
+}
+nontrading_volume_list
+```
+
+```{r}
+# Create a data frame for plotting
+plot_df <- data.frame(x = -13:13,trading_volume_list = trading_volume_list,nontrading_volume_list = nontrading_volume_list)
+plot_df <- plot_df %>%
+  mutate(trading_volume_scaled = trading_volume_list / 1000000,
+         nontrading_volume_scaled = nontrading_volume_list / 1000000)
+plot_df1 <- data.frame(x = -13:13, y = (trading_volume_list - nontrading_volume_list) / 10000000)
+plot_df_trade <- data.frame(x = -13:13, y = trading_volume_list / 10000000)
+
+# Plot comparison of trading partners and non-trading countries
+ggplot(plot_df, aes(x = x)) +
+  geom_line(aes(y = trading_volume_scaled, color = 'Trading Partners')) +
+  geom_line(aes(y = nontrading_volume_scaled, color = 'Non-trading Countries')) +
+  scale_color_manual(values = c('Trading Partners' = 'blue', 'Non-trading Countries' = 'red')) +
+  theme_minimal() +
+  labs(x = "Centered Year", y = "Nominal Trade Volume (in millions)", title = "Comparison Plot (Trade Volume)") +
+  theme(legend.title = element_blank())
+
+# Plot difference in trade volume
+ggplot(plot_df1, aes(x = x)) +
+  geom_line(aes(y = y), color = 'blue') +
+  labs(x = "Centered Year", y = "Difference in Trade Volume (in millions)", title = "How PTA's Effect on Trade Volume Fluctuates")
+
+# Plot trade volume
+ggplot(plot_df_trade, aes(x = x)) +
+  geom_line(aes(y = y), color = 'blue') +
+  labs(x = "Centered Year", y = "Trade Volume (in millions)", title = "Trade Volume Over Time")
+```
+
+
+
+```{r}
+#Looking at how trade volume and ideal point distance progressed 
+
+# Calculate the mean ideal point distance for each year
+mean_ideal_point_distance_by_year <- df %>%
+  group_by(year) %>%
+  summarize(mean_ideal_point_distance = mean(IdealPointDistance, na.rm = TRUE)) %>%
+  ungroup()
+
+# Calculate the mean trade volume for each year
+mean_trade_volume_by_year <- tv_data %>%
+  mutate(country_pair = pmin(ccode1, ccode2),
+         country_pair_2 = pmax(ccode1, ccode2)) %>%
+  group_by(country_pair, country_pair_2, year) %>%
+  summarize(mean_Total_Trade_Flow = mean(Total.Trade.Flow, na.rm = TRUE)) %>%
+  ungroup() %>%
+  # Create the original ccode1 and ccode2 ceanolumns from the unique identifiers
+  mutate(ccode1 = country_pair,
+         ccode2 = country_pair_2) %>%
+  select(ccode1, ccode2, year, mean_Total_Trade_Flow) %>%
+  group_by(year) %>%
+  summarize(sum_tv = sum(mean_Total_Trade_Flow), na.rm = TRUE) %>%
+  ungroup()
+
+# Correlation
+merged_data <- merge(mean_ideal_point_distance_by_year, mean_trade_volume_by_year, by = "year")
+
+cor(merged_data$mean_ideal_point_distance, merged_data$sum_tv, use = "complete.obs")
+```
+
+```{r}
+#Create tv_reg_df with lagged average trade volume growth rate
+tv_reg_df <- tv_data %>%
+  arrange(ccode1, ccode2, year) %>%
+  group_by(ccode1, ccode2) %>%
+  mutate(growth_rate = (Total.Trade.Flow / lag(Total.Trade.Flow) - 1) * 100) %>%
+  mutate(three_year_avg_growth = (growth_rate + lag(growth_rate) + lag(growth_rate, 2)) / 3) %>%
+  mutate(lagged_tv_growth = lag(three_year_avg_growth)) %>%
+  ungroup()
+  
+  
+tv_test <- tv_reg_df %>%
+  filter(ccode1 %in% c(2,20), ccode2 %in% c(2,20))
+  
+```
+
+
+```{r}
+#Load Distance Data
+dist <- cepiigeodist::dist_cepii 
+
+dist <- dist %>%
+  mutate(iso_o = countrycode(iso_o, origin = 'iso3c', destination = 'cown'), iso_d = countrycode(iso_d, origin = 'iso3c', destination = 'cown')) %>%
+  rename(ccode1 = iso_o, ccode2 = iso_d) %>%
+  filter(!is.na(ccode1) & !is.na(ccode2)) %>%
+  filter(ccode1 != ccode2) %>%
+  select(ccode1, ccode2, contig, comlang_off, distwces)
+
+#Load Regime type index data
+polity <- read.csv('~/Downloads/polity.csv')
+
+polity <- polity %>%
+  mutate(Code = countrycode(Code, origin = 'iso3c', destination = 'cown')) %>%
+  select(-Entity) %>%
+  rename(year = Year, ccode1 = Code) %>%
+  filter(!is.na(ccode1))
+
+
+#Load CINC data
+CINC <- read.csv('~/Downloads/NMC-60-wsupplementary.csv')
+
+CINC <- CINC %>%
+  select(ccode, year, cinc) %>%
+  rename(ccode1 = ccode)
+```
+
+```{r}
+#Create Regression df_reg
+
+#Merge Datasets
+df_reg <- left_join(df, tv_reg_df, by = c('ccode1', 'ccode2', 'year'))
+
+df_reg <- df_reg %>%
+  filter(!is.na(Total.Trade.Flow))
+
+df_reg <- left_join(df_reg, dist, by = c('ccode1', 'ccode2'))
+
+df_reg <- left_join(df_reg, polity, by = c('ccode1', 'year')) %>%
+  rename(regime1 = Democracy)
+
+df_reg <- left_join(df_reg, polity, by = c('ccode2' = 'ccode1', 'year')) %>%
+  rename(regime2 = Democracy)
+
+df_reg <- left_join(df_reg, CINC, by = c('ccode1', 'year')) %>%
+  rename(cinc1 = cinc)
+
+df_reg <- left_join(df_reg, CINC, by = c('ccode2' = 'ccode1', 'year')) %>%
+  rename(cinc2 = cinc)
+
+df_reg <- df_reg %>%
+  mutate(regime_diff = abs(regime1 - regime2), dist = as.numeric(distwces), cinc_diff = abs(cinc1 - cinc2)) %>%
+  mutate(trade_share1 = Total.Trade.Flow/GDP1, trade_share2 = Total.Trade.Flow/GDP2) %>%
+  select(-distwces)
+
+df_reg$country_pair <- paste(df_reg$ccode1, df_reg$ccode2, sep = "_")
+df_reg$ccode1_time <- paste(df_reg$ccode1, df_reg$year, sep = "_")
+df_reg$ccode2_time <- paste(df_reg$ccode2, df_reg$year, sep = "_")
+
+
+df_reg1 <- df_reg %>%
+  group_by(ccode1, ccode2) %>%
+  mutate(trend_ts = lag(trade_share1,1) - lag(trade_share1,4))
+  
+  
+  
+```
+
+```{r}
+#Regression
+reg <- lm(IdealPointDistance ~ year + ta_dummy + ta_dummy * year + log(Total.Trade.Flow) + three_year_avg_growth + contig + comlang_off + log(dist) + regime1 + regime2 + log(cinc1) + log(cinc2) + log(GDP1) + log(GDP2), df_reg)
+
+summary(reg)
+
+vif(reg)
+
+#Regression with trade share
+
+reg_ts <- lm(IdealPointDistance ~ year + ta_dummy + ta_dummy * year + three_year_avg_growth + contig + comlang_off + dist + regime1 + regime2 + cinc1 + cinc2 + log(GDP1) + log(GDP2) + log(GDP_per_capita.x) + log(GDP_per_capita.y) + trend_ts, df_reg1)
+
+summary(reg_ts)
+```
+
+```{r}
+df_reg$expectation_dummy <- ifelse(df_reg$lagged_tv_growth < 0, 1, 0)
+
+
+#Regression with fixed effects
+reg_fe <- feols(IdealPointDistance ~ ta_dummy + log(Total.Trade.Flow) + three_year_avg_growth | country_pair + ccode1_time + ccode2_time , data = df_reg)
+
+summary(reg_fe)
+
+#Create ta_dummy1 where it's set to 1 only in the year when the trade agreement is signed
+df <- df %>%
+  mutate(ta_dummy1 = ifelse(year == first_ta_year, 1, 0))
+
+#Regression for anticipatory effects
+df_reg_anticipatory <- df_reg %>%
+  arrange(ccode1, ccode2, year) %>%
+  group_by(ccode1, ccode2) %>%
+  mutate(
+    ta_dummy_lead1 = lead(ta_dummy1, 1),
+    ta_dummy_lead2 = lead(ta_dummy1, 2),
+    ta_dummy_lead3 = lead(ta_dummy1, 3),
+    ta_dummy_lead4 = lead(ta_dummy1, 4),
+    ta_dummy_lead5 = lead(ta_dummy1, 5),
+    ta_dummy_lead6 = lead(ta_dummy1, 6),
+    ta_dummy_lead7 = lead(ta_dummy1, 7),
+    ta_dummy_lead8 = lead(ta_dummy1, 8),
+    ta_dummy_lead9 = lead(ta_dummy1, 9),
+    ta_dummy_lead10 = lead(ta_dummy1, 10)
+  ) %>%
+  ungroup()
+
+# Replace NA values in forward-lagged variables with 0
+df_reg_anticipatory <- df_reg_anticipatory %>%
+  mutate(
+    ta_dummy_lead1 = replace_na(ta_dummy_lead1, 0),
+    ta_dummy_lead2 = replace_na(ta_dummy_lead2, 0),
+    ta_dummy_lead3 = replace_na(ta_dummy_lead3, 0),
+    ta_dummy_lead4 = replace_na(ta_dummy_lead4, 0),
+    ta_dummy_lead5 = replace_na(ta_dummy_lead5, 0),
+    ta_dummy_lead6 = replace_na(ta_dummy_lead6, 0),
+    ta_dummy_lead7 = replace_na(ta_dummy_lead7, 0),
+    ta_dummy_lead8 = replace_na(ta_dummy_lead8, 0),
+    ta_dummy_lead9 = replace_na(ta_dummy_lead9, 0),
+    ta_dummy_lead10 = replace_na(ta_dummy_lead10, 0)
+  )
+
+# Run the regression model
+reg_anticipatory <- feols(IdealPointDistance ~ ta_dummy1 + ta_dummy_lead1 + ta_dummy_lead2 + ta_dummy_lead3 + ta_dummy_lead4 + ta_dummy_lead5 + ta_dummy_lead6 + ta_dummy_lead7 + ta_dummy_lead8 + ta_dummy_lead9 + ta_dummy_lead10 + log(Total.Trade.Flow) + lagged_tv_growth | country_pair + ccode1_time + ccode2_time , data = df_reg_anticipatory)
+
+# Create cumulative lead variable
+df_reg_anticipatory <- df_reg_anticipatory %>%
+  mutate(ta_dummy_cumulative = ta_dummy_lead1 + ta_dummy_lead2 + ta_dummy_lead3 + ta_dummy_lead4 + ta_dummy_lead5 + ta_dummy_lead6 + ta_dummy_lead7 + ta_dummy_lead8 + ta_dummy_lead9 + ta_dummy_lead10)
+
+#Create new trend variable
+df_reg_anticipatory <- df_reg_anticipatory %>%
+  group_by(ccode1, ccode2) %>%
+  mutate(tv_growth_trend = (Total.Trade.Flow - lag(Total.Trade.Flow, 3))/lag(Total.Trade.Flow, 3))
+
+df_test <- df_reg_anticipatory %>%
+  filter(ccode1 == 2, ccode2 == 20)
+
+# Run the regression model
+reg_anticipatory <- feols(IdealPointDistance ~ ta_dummy + ta_dummy1 + ta_dummy_cumulative + log(Total.Trade.Flow) + tv_growth_trend | country_pair + ccode1_time + ccode2_time, data = df_reg_anticipatory)
+
+
+summary(reg_anticipatory)
+```
+
+```{r}
+#PPML
+reg_ppml <- feglm(IdealPointDistance ~ ta_dummy + log(Total.Trade.Flow) + lagged_tv_growth | country_pair + ccode1_time + ccode2_time, data = df_reg, family = poisson())
+
+summary(reg_ppml)
+```
+
+```{r}
+df_mean_ipd <- df %>%
+  mutate(
+    category = case_when(
+      first_ta_year == Inf ~ "Never Trade",
+      ta_dummy == 1 ~ "Trading",
+      ta_dummy == 0 & first_ta_year <= year + 3 & first_ta_year > year ~ "Trade Within 3 Years",
+      ta_dummy == 0 & first_ta_year > year ~ "No Trade Yet"
+    )) %>%
+  replace_na(list(category = "Canceled Their Trade Agreement"))
+
+
+# Calculate mean ideal point distance for each category and year
+df_mean_ipd <- df_mean_ipd %>%
+  group_by(year, category) %>%
+  summarise(mean_distance = mean(IdealPointDistance, na.rm = TRUE))
+
+# Plot the data
+ggplot(df_mean_ipd, aes(x = year, y = mean_distance, color = category)) + geom_line() +
+  labs(
+    title = "Mean Ideal Point Distance Over Time",
+    x = "Year",
+    y = "Mean Ideal Point Distance",
+    color = "Category"
+  ) +
+  scale_x_continuous(breaks = seq(1946, 2022, by = 5)) +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+
+
+df_test <- df %>%
+  filter(first_ta_year == 2004, year == 2004) %>%
+  mutate(ccode_combined = paste(ccode1, ccode2, sep = "_")) %>%
+  distinct(ccode_combined, .keep_all = TRUE)
+
+```
+
+```{r}
+#Synthetic DiD
+# Load necessary packages
+library(synthdid)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Prepare the data for synthetic DiD analysis
+syndid_reg <- df_reg %>%
+  mutate(log_Total_Trade_Flow = log(Total.Trade.Flow)) %>%
+  distinct(country_pair, year, .keep_all = TRUE)
+
+# Ensure correct column types
+syndid_reg <- syndid_reg %>%
+  mutate(across(where(is.character), as.factor))
+
+# Create matrices for the outcome, treatment, and covariates
+Y <- syndid_reg %>%
+  pivot_wider(names_from = year, values_from = IdealPointDistance) %>%
+  select(-country_pair) %>%
+  as.matrix()
+
+N <- length(unique(df_reg$country_pair))
+T <- length(unique(df_reg$year))
+
+# Create the treatment matrix
+D <- syndid_reg %>%
+  mutate(row = as.numeric(factor(country_pair)),
+         col = as.numeric(factor(year))) %>%
+  select(row, col, ta_dummy) %>%
+  pivot_wider(names_from = col, values_from = ta_dummy, values_fill = list(ta_dummy = 0)) %>%
+  select(-row) %>%
+  as.matrix()
+
+# Create the covariate matrix using vectorized operations
+covariates <- syndid_reg %>%
+  pivot_wider(names_from = year, values_from = c(log_Total_Trade_Flow, three_year_avg_growth)) %>%
+  arrange(country_pair)
+
+# Reshape covariates to be a 3-dimensional array (units, time periods, covariates)
+X <- array(NA, dim = c(N, T, 2))
+for (i in 1:N) {
+  for (t in 1:T) {
+    country <- unique(syndid_reg$country_pair)[i]
+    year <- unique(syndid_reg$year)[t]
+    row <- covariates %>% filter(country_pair == country)
+    if (nrow(row) == 1) {
+      X[i, t, 1] <- row[[paste0("log_Total_Trade_Flow_", year)]]
+      X[i, t, 2] <- row[[paste0("three_year_avg_growth_", year)]]
+    }
+  }
+}
+
+# Determine the number of control units
+N0 <- sum(rowSums(D) == 0)  # Number of control units
+
+# Identify the treated units
+treated_units <- which(rowSums(D) > 0)
+
+# Determine the number of pre-treatment periods for treated units
+T0 <- min(apply(D[treated_units, ], 1, function(x) which(x == 1)[1])) - 1
+
+# Create the panel data object
+panel <- list(Y = Y, D = D, X = X)
+
+# Estimate the synthetic DiD treatment effect
+synthdid_est <- synthdid_estimate(panel, N0 = N0, T0 = T0)
+
+# Summarize the results
+summary(synthdid_est)
+
+# Create a visualization of the synthetic trends
+synthdid_plot <- synthdid_plot(synthdid_est)
+
+# Plot the synthetic trends
+print(synthdid_plot)
+```
+
+```{r}
+
+
+
+```

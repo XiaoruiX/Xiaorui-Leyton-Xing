@@ -1,0 +1,316 @@
+---
+title: "Thesis(4)"
+output: html_document
+date: "2024-10-29"
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+setwd('~/Downloads')
+
+library(tidyverse)
+library(tidylog)
+library(readxl)
+library(countrycode)
+library(cepiigeodist)
+library(fixest)
+library(dplyr)
+library(car)
+library(stargazer)
+
+
+#Load df
+df <- read.csv('~/Downloads/AgreementScoresAll_Jul2023.csv')
+df <- drop_na(df, IdealPointAll.x, NVotesAll.x, IdealPointAll.y, NVotesAll.y, IdealPointDistance)
+
+#Load deflator
+deflator <- read.csv('~/Downloads/GDP Deflator.csv')
+
+deflator <- deflator %>%
+  dplyr::select(Country.Name, Time.Period, Gross.Domestic.Product..Deflator..Index..NGDP_D_IX.) %>%
+  rename(year = Time.Period, deflator = Gross.Domestic.Product..Deflator..Index..NGDP_D_IX.) %>%
+  mutate(Country.Name =  countrycode(as.character(Country.Name), "country.name", "cown")) %>%
+  rename(ccode1 = Country.Name) %>%
+  filter(!is.na(ccode1) & !is.na(deflator), deflator != 0)
+
+
+#Load trade agreement data
+Trade_data <- read_excel("~/Downloads/EIA Data Web Folder - 195 Countries - Files July 31 2021 EXTERNAL/EIA Database July 31 2021 (with links).xlsm", sheet = "Data Sheet")
+Trade_data <- Trade_data %>%
+  mutate(across(everything(), ~ gsub("Czechoslovachia", "Czechoslovakia", .)))
+
+exclude_list <- c(
+  "Aruba", "Bermuda", "Cayman Islands", "Faeroe Islands", "Greenland",
+  "Hong Kong", "Macao, China", "Micronesia", "Netherlands Antilles", "New Caledonia")
+
+Trade_data <- Trade_data %>%
+  filter(!(Exporter %in% exclude_list) & !(Importer %in% exclude_list)) %>%
+  mutate(Importer = countrycode(as.character(Importer), "country.name", "cown")) %>%
+  rename(ccode2 = Importer) %>%
+  mutate(Exporter = countrycode(as.character(Exporter), "country.name", "cown")) %>%
+  rename(ccode1 = Exporter)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Reshape Trade_data to long format
+Trade_data_long <- Trade_data %>%
+  pivot_longer(
+    cols = c(starts_with("19"), starts_with("20")),
+    names_to = "year",
+    values_to = "trade_agreement_value"
+  ) %>%
+  mutate(
+    year = as.numeric(year),
+    fta_dummy = ifelse(trade_agreement_value == 3, 1, 0),
+    cu_dummy = ifelse(trade_agreement_value == 4, 1, 0),
+    cm_dummy = ifelse(trade_agreement_value == 5, 1, 0),
+    eu_dummy = ifelse(trade_agreement_value == 6, 1, 0)
+  ) %>%
+  dplyr::select(ccode1, ccode2, year, fta_dummy, cu_dummy, cm_dummy, eu_dummy)
+
+df <- df %>%
+  left_join(Trade_data_long, by = c("ccode1", "ccode2", "year"))
+
+library(dplyr)
+
+# Function to process each dummy
+process_dummy <- function(df, dummy_name) {
+  # Identify country pairs with NA in 2017
+  country_pairs_with_na_in_2017 <- df %>%
+    filter(year == 2017, is.na(!!sym(dummy_name))) %>%
+    dplyr::select(ccode1, ccode2) %>%
+    mutate(pair_id = paste(ccode1, ccode2, sep = "-"))
+
+  # Identify country pairs with 1 in 2017
+  country_pairs_with_ta_in_2017 <- df %>%
+    filter(year == 2017, !!sym(dummy_name) == 1) %>%
+    dplyr::select(ccode1, ccode2) %>%
+    mutate(pair_id = paste(ccode1, ccode2, sep = "-"))
+
+  df <- df %>%
+    mutate(pair_id = paste(ccode1, ccode2, sep = "-")) %>%
+    mutate(!!sym(dummy_name) := ifelse(pair_id %in% country_pairs_with_na_in_2017$pair_id & year >= 2018 & year <= 2022, NA, !!sym(dummy_name))) %>%
+    mutate(!!sym(dummy_name) := ifelse(pair_id %in% country_pairs_with_ta_in_2017$pair_id & year >= 2018 & year <= 2022, 1, !!sym(dummy_name))) %>%
+    dplyr::select(-pair_id)
+
+  return(df)
+}
+
+# Process each dummy
+df <- process_dummy(df, "fta_dummy")
+df <- process_dummy(df, "cu_dummy")
+df <- process_dummy(df, "cm_dummy")
+df <- process_dummy(df, "eu_dummy")
+
+# Additional columns
+df$country_pair <- paste(df$ccode1, df$ccode2, sep = "_")
+df$ccode1_time <- paste(df$ccode1, df$year, sep = "_")
+df$ccode2_time <- paste(df$ccode2, df$year, sep = "_")
+```
+
+```{r}
+#Trade Volume Data
+tv_data <- read.csv('~/Downloads/DOTS.csv')
+
+#Create a named vector with custom match
+custom_matches <- c("Serbia, Rep. of" = "345")
+
+tv_data <- tv_data %>%
+  filter(!Country.Name %in% c("Advanced Economies", "Bermuda", "Emerging and Developing Economies"),
+         !Counterpart.Country.Name %in% c("Advanced Economies", "Bermuda", "Emerging and Developing Economies")) %>%
+  mutate(Country.Name = countrycode(as.character(Country.Name), "country.name", "cown", custom_match = custom_matches),
+         Counterpart.Country.Name = countrycode(as.character(Counterpart.Country.Name), "country.name", "cown", custom_match = custom_matches)) %>%
+  rename(ccode1 = Country.Name, ccode2 = Counterpart.Country.Name, year = Time.Period, Export = Goods..Value.of.Exports..Free.on.board..FOB...US.Dollars..TXG_FOB_USD., Import = Goods..Value.of.Imports..Cost..Insurance..Freight..CIF...US.Dollars..TMG_CIF_USD., 'Trade Balance' = Goods..Value.of.Trade.Balance..US.Dollars..TBG_USD.) %>%
+  dplyr::select(-Country.Code, -Counterpart.Country.Code, -Status, -Status.1, -Status.2, -X, -Goods..Value.of.Imports..Free.on.board..FOB...US.Dollars..TMG_FOB_USD., -Status.3) %>% 
+  mutate(Total.Trade.Flow = ifelse(is.na(Export) & is.na(Import), NA, coalesce(Export, 0) + coalesce(Import, 0)))
+
+tv_data$ccode1 <- as.numeric(tv_data$ccode1)
+tv_data$ccode2 <- as.numeric(tv_data$ccode2)
+
+tv_data <- left_join(tv_data, deflator, by = c("ccode1", "year")) %>%
+  filter(!is.na(Total.Trade.Flow) & !is.na(deflator)) %>%
+  mutate(Total.Trade.Flow = Total.Trade.Flow/deflator*100)
+  
+df_reg <- left_join(df, tv_data, by = c('ccode1', 'ccode2', 'year')) %>%
+  filter(!is.na(Total.Trade.Flow)) %>%
+  drop_na(fta_dummy, cu_dummy, cm_dummy, eu_dummy)
+
+df_reg1 <- df_reg %>%
+  rowwise() %>%
+  mutate(
+    fta_dummy = ifelse(!is.na(fta_dummy) & is.na(cu_dummy) & is.na(cm_dummy) & is.na(eu_dummy), fta_dummy, ifelse(is.na(fta_dummy), 0, fta_dummy)),
+    cu_dummy = ifelse(!is.na(cu_dummy) & is.na(fta_dummy) & is.na(cm_dummy) & is.na(eu_dummy), cu_dummy, ifelse(is.na(cu_dummy), 0, cu_dummy)),
+    cm_dummy = ifelse(!is.na(cm_dummy) & is.na(fta_dummy) & is.na(cu_dummy) & is.na(eu_dummy), cm_dummy, ifelse(is.na(cm_dummy), 0, cm_dummy)),
+    eu_dummy = ifelse(!is.na(eu_dummy) & is.na(fta_dummy) & is.na(cu_dummy) & is.na(cm_dummy), eu_dummy, ifelse(is.na(eu_dummy), 0, eu_dummy))
+  ) %>%
+  ungroup() %>%
+  drop_na(fta_dummy, cu_dummy, cm_dummy, eu_dummy)
+
+df_test <- df_reg %>%
+  filter(is.na(fta_dummy) & !is.na(cu_dummy)) %>%
+
+```
+
+```{r}
+# Filter rows where all four dummies are 0
+all_zero_rows <- df %>%
+  filter(fta_dummy == 0 & cu_dummy == 0 & cm_dummy == 0 & eu_dummy == 0)
+
+# Create separate dataframes for each dummy
+fta_df <- df %>%
+  filter(fta_dummy == 1) %>%
+  bind_rows(all_zero_rows)
+
+df %>%
+  summarise_all(~ any(is.na(.)))
+
+cu_df <- df %>%
+  filter(cu_dummy == 1) %>%
+  bind_rows(all_zero_rows)
+
+cm_df <- df %>%
+  filter(cm_dummy == 1) %>%
+  bind_rows(all_zero_rows)
+
+eu_df <- df %>%
+  filter(eu_dummy == 1) %>%
+  bind_rows(all_zero_rows)
+
+df_test <- df %>%
+  drop_na(fta_dummy, cu_dummy, cm_dummy, eu_dummy)
+
+
+hetero_reg1 <- feols(log(IdealPointDistance) ~ fta_dummy + cu_dummy + cm_dummy + eu_dummy | country_pair + ccode1_time + ccode2_time, data = df)
+
+summary(hetero_reg1)
+
+hetero_reg2 <- feols(log(Total.Trade.Flow) ~ fta_dummy + cu_dummy + cm_dummy + eu_dummy | country_pair + ccode1_time + ccode2_time, data = df_reg)
+
+summary(hetero_reg2)
+
+```
+
+
+
+
+
+```{r}
+fta_fe <- feols(log(IdealPointDistance) ~ fta_dummy | country_pair + ccode1_time + ccode2_time, data = fta_df)
+
+summary(fta_fe)
+
+cu_fe <- feols(log(IdealPointDistance) ~ cu_dummy | country_pair + ccode1_time + ccode2_time, data = cu_df)
+
+summary(cu_fe)
+
+cm_fe <- feols(log(IdealPointDistance) ~ cm_dummy | country_pair + ccode1_time + ccode2_time, data = cm_df)
+
+summary(cm_fe)
+
+eu_fe <- feols(log(IdealPointDistance) ~ eu_dummy | country_pair + ccode1_time + ccode2_time, data = eu_df)
+
+summary(eu_fe)
+
+
+
+```
+
+```{r}
+df_test <- cu_df %>%
+  filter(cu_dummy == 1, year == 2022)
+
+unique(df_test$ccode1) 
+
+
+df_test <- df %>%
+  filter(year == 2022, ccode1 == 51)
+
+```
+
+```{r}
+ftaa_country_codes <- c(58, 160, 31, 53, 80, 145, 140, 20, 155, 100, 94, 54, 51, 130, 92, 55, 93, 110, 41, 91, 51, 70, 95, 95, 150, 135, 60, 61, 62, 115, 52, 2, 165, 101)
+
+ftaa_df <- df %>%
+  filter(ccode1 %in% ftaa_country_codes & ccode2 %in% ftaa_country_codes & year >= 1990 & year <= 2010) %>%
+  mutate(pair_id = ifelse(ccode1 < ccode2, paste(ccode1, ccode2, sep = "_"), paste(ccode2, ccode1, sep = "_"))) %>%
+  distinct(year, pair_id, .keep_all = TRUE) %>%
+  dplyr::select(-pair_id)
+
+ftaa_df <- ftaa_df %>%
+  group_by(year) %>%
+  summarise(mean_ideal_distance = mean(IdealPointDistance, na.rm = TRUE))
+
+# Plot the result
+ggplot(ftaa_df, aes(x = year, y = mean_ideal_distance)) +
+  geom_line(color = "blue")
+  theme_minimal() +
+  labs(title = "Average Ideal Distance Between FTAA Countries (1994-2010)",
+       x = "Year",
+       y = "Average Ideal Distance") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r}
+# Vector of COW country codes for MAI countries
+mai_country_codes <- c(900, 305, 211, 20, 316, 390, 375, 220, 255, 350, 310, 395, 205, 325, 740, 212, 70, 210, 920, 385, 290, 235, 732, 230, 380, 225, 640, 200, 2)
+
+# Filter the dataframe for the specified countries and years
+mai_df <- df %>%
+  filter(ccode1 %in% mai_country_codes & ccode2 %in% mai_country_codes & year >= 1990 & year <= 2005) %>%
+  mutate(pair_id = ifelse(ccode1 < ccode2, paste(ccode1, ccode2, sep = "_"), paste(ccode2, ccode1, sep = "_"))) %>%
+  distinct(year, pair_id, .keep_all = TRUE) %>%
+  dplyr::select(-pair_id)
+
+# Group by year and calculate the mean ideal distance for each year
+mai_df <- mai_df %>%
+  group_by(year) %>%
+  summarise(mean_ideal_distance = mean(IdealPointDistance, na.rm = TRUE))
+
+# Plot the result
+ggplot(mai_df, aes(x = year, y = mean_ideal_distance)) +
+  geom_line(color = "blue")
+  theme_minimal() +
+  labs(title = "Average Ideal Distance Between MAI Countries (1995-1998)",
+       x = "Year",
+       y = "Average Ideal Distance") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Vector of COW country codes for the United States and SACU countries
+us_sacu_country_codes <- c(2, 571, 572, 570, 565, 560) # United States, Botswana, Eswatini, Lesotho, Namibia, South Africa
+
+# Filter the dataframe for the specified countries and years
+us_sacu_df <- df %>%
+  filter((ccode1 %in% us_sacu_country_codes) & (ccode2 %in% us_sacu_country_codes) & (year >= 2000 & year <= 2015)) %>%
+  mutate(pair_id = ifelse(ccode1 < ccode2, paste(ccode1, ccode2, sep = "_"), paste(ccode2, ccode1, sep = "_"))) %>%
+  distinct(year, pair_id, .keep_all = TRUE) %>%
+  dplyr::select(-pair_id)
+
+# Calculate the average ideal distance between the United States and SACU countries for each year
+us_sacu_avg_df <- us_sacu_df %>%
+  filter(ccode1 == 2 | ccode2 == 2) %>%
+  group_by(year) %>%
+  summarise(mean_ideal_distance = mean(IdealPointDistance, na.rm = TRUE))
+
+# Plot the result
+ggplot(us_sacu_avg_df, aes(x = year, y = mean_ideal_distance)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  theme_minimal() +
+  labs(title = "Average Ideal Distance Between the United States and SACU Countries (2003-2008)",
+       x = "Year",
+       y = "Average Ideal Distance") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+``` #Turkey #Viner book #On the number and size of nations 97 #Economic integration and political disintegration
+ 
+

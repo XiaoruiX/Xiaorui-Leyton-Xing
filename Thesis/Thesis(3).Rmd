@@ -1,0 +1,1447 @@
+---
+title: "Thesis(3)"
+output: html_document
+date: "2024-07-07"
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+setwd('~/Downloads')
+
+library(tidyverse)
+library(tidylog)
+library(readxl)
+library(countrycode)
+library(cepiigeodist)
+library(fixest)
+library(dplyr)
+library(car)
+library(stargazer)
+
+
+#Load df
+df <- read.csv('~/Downloads/AgreementScoresAll_Jul2023.csv')
+df <- drop_na(df, IdealPointAll.x, NVotesAll.x, IdealPointAll.y, NVotesAll.y, IdealPointDistance)
+
+#Load deflator
+deflator <- read.csv('~/Downloads/GDP Deflator.csv')
+
+deflator <- deflator %>%
+  dplyr::select(Country.Name, Time.Period, Gross.Domestic.Product..Deflator..Index..NGDP_D_IX.) %>%
+  rename(year = Time.Period, deflator = Gross.Domestic.Product..Deflator..Index..NGDP_D_IX.) %>%
+  mutate(Country.Name =  countrycode(as.character(Country.Name), "country.name", "cown")) %>%
+  rename(ccode1 = Country.Name) %>%
+  filter(!is.na(ccode1) & !is.na(deflator), deflator != 0)
+
+
+#Load trade agreement data
+Trade_data <- read_excel("~/Downloads/EIA Data Web Folder - 195 Countries - Files July 31 2021 EXTERNAL/EIA Database July 31 2021 (with links).xlsm", sheet = "Data Sheet")
+Trade_data <- Trade_data %>%
+  mutate(across(everything(), ~ gsub("Czechoslovachia", "Czechoslovakia", .)))
+
+exclude_list <- c(
+  "Aruba", "Bermuda", "Cayman Islands", "Faeroe Islands", "Greenland",
+  "Hong Kong", "Macao, China", "Micronesia", "Netherlands Antilles", "New Caledonia")
+
+Trade_data <- Trade_data %>%
+  filter(!(Exporter %in% exclude_list) & !(Importer %in% exclude_list)) %>%
+  mutate(Importer = countrycode(as.character(Importer), "country.name", "cown")) %>%
+  rename(ccode2 = Importer) %>%
+  mutate(Exporter = countrycode(as.character(Exporter), "country.name", "cown")) %>%
+  rename(ccode1 = Exporter)
+```
+
+```{r}
+#Creating ta_dummy for df
+
+# Reshape Trade_data to long format
+Trade_data_long <- Trade_data %>%
+  pivot_longer(
+    cols = c(starts_with("19"), starts_with("20")),
+    names_to = "year",
+    values_to = "trade_agreement_value"
+  ) %>%
+  mutate(year = as.numeric(year), ta_dummy = ifelse(trade_agreement_value %in% c(3, 4, 5, 6), 1, 0)) %>%
+  dplyr::select(ccode1, ccode2, year, ta_dummy)
+
+
+df <- df %>%
+  left_join(Trade_data_long, by = c("ccode1", "ccode2", "year"))
+
+df_test <- df %>%
+  filter(ccode1 == 365, ccode2 == 372)
+
+df_test <- df %>%
+  filter(year == 2017)
+```
+
+
+```{r}
+#Setting ta_dummy to be NA from 2018 to 2022 if it is NA in 2017
+country_pairs_with_na_in_2017 <- df %>%
+  filter(year == 2017, is.na(ta_dummy)) %>%
+  dplyr::select(ccode1, ccode2)
+country_pairs_with_na_in_2017 <- country_pairs_with_na_in_2017 %>%
+  mutate(pair_id = paste(ccode1, ccode2, sep = "-"))
+
+df <- df %>%
+  mutate(pair_id = paste(ccode1, ccode2, sep = "-")) %>%
+  mutate(ta_dummy = ifelse(pair_id %in% country_pairs_with_na_in_2017$pair_id &
+                           year >= 2018 & year <= 2022, NA, ifelse(year <= 2017, ta_dummy, 0))) %>%
+  dplyr::select(-pair_id)
+
+#Setting ta_dummy to be 1 from 2018 to 2022 if it is 1 in 2017
+# Step 1: Identify country pairs with ta_dummy == 1 in 2017
+country_pairs_with_ta_in_2017 <- df %>%
+  filter(year == 2017, ta_dummy == 1) %>%
+  dplyr::select(ccode1, ccode2)
+country_pairs_with_ta_in_2017 <- country_pairs_with_ta_in_2017 %>%
+  mutate(pair_id = paste(ccode1, ccode2, sep = "-"))
+
+# Step 2: Update ta_dummy for the years 2018 to 2022 for these exact country pairs
+df <- df %>%
+  mutate(pair_id = paste(ccode1, ccode2, sep = "-")) %>%
+  mutate(ta_dummy = ifelse(pair_id %in% country_pairs_with_ta_in_2017$pair_id &
+                           year >= 2018 & year <= 2022, 1, ta_dummy)) %>%
+  dplyr::select(-pair_id)
+
+#Drop NA so df is all 1 and 0
+df <- df %>%
+  filter(!is.na(ta_dummy))
+
+df <- df %>%
+  mutate(td_dummy = ifelse(ta_dummy == 1, 0, 1))
+```
+
+```{r}
+# Create the "centered year" column
+df <- df %>%
+  group_by(ccode1, ccode2) %>%
+  mutate(
+    first_ta_year = min(year[ta_dummy == 1], na.rm = TRUE),
+    centered_year = year - first_ta_year) %>%
+  ungroup() %>%
+  filter(!(year >= first_ta_year & ta_dummy == 0)) #Taking out observations where a trade agreement has been canceled
+
+# Note: Country pairs without any trade agreements (ta_dummy never equals 1),
+# 'first_ta_year' will be Inf, and 'centered_year' will be NA.
+
+
+df$country_pair <- paste(df$ccode1, df$ccode2, sep = "_")
+df$ccode1_time <- paste(df$ccode1, df$year, sep = "_")
+df$ccode2_time <- paste(df$ccode2, df$year, sep = "_")
+```
+
+```{r}
+GDP <- read_excel("~/Downloads/GDP.xlsx", sheet = "Data") #Penn World Table
+
+GDP <- GDP %>%
+  mutate(country =  countrycode(as.character(country), "country.name", "cown")) %>%
+  dplyr::select(country, year, pop, rgdpna) %>%
+  rename(GDP = rgdpna) %>%
+  mutate(GDP_per_capita = GDP/pop) %>%
+  filter(!is.na(country))
+
+
+# Merge GDP data for ccode1
+df <- df %>%     
+  left_join(GDP, by = c("ccode1" = "country", "year")) %>%
+  rename(GDP1 = GDP) %>%
+  mutate(GDP1 = GDP1 * 1e+06)
+
+# Merge GDP data for ccode2
+df <- df %>%
+  left_join(GDP, by = c("ccode2" = "country", "year")) %>%
+  rename(GDP2 = GDP) %>%
+  mutate(GDP2 = GDP2 * 1e+06)
+
+# Calculate the difference in GDP
+df <- df %>%
+  mutate(GDP_diff = abs(GDP1 - GDP2), GDP_per_capita_diff = abs(GDP_per_capita.x - GDP_per_capita.y), GDP_diff_proportionate = GDP_diff/(GDP1+GDP2)) %>%
+  dplyr::select(-pop.x, -pop.y)
+```
+
+```{r}
+#Trade Volume Data
+tv_data <- read.csv('~/Downloads/DOTS.csv')
+
+#Create a named vector with custom match
+custom_matches <- c("Serbia, Rep. of" = "345")
+
+tv_data <- tv_data %>%
+  filter(!Country.Name %in% c("Advanced Economies", "Bermuda", "Emerging and Developing Economies"),
+         !Counterpart.Country.Name %in% c("Advanced Economies", "Bermuda", "Emerging and Developing Economies")) %>%
+  mutate(Country.Name = countrycode(as.character(Country.Name), "country.name", "cown", custom_match = custom_matches),
+         Counterpart.Country.Name = countrycode(as.character(Counterpart.Country.Name), "country.name", "cown", custom_match = custom_matches)) %>%
+  rename(ccode1 = Country.Name, ccode2 = Counterpart.Country.Name, year = Time.Period, Export = Goods..Value.of.Exports..Free.on.board..FOB...US.Dollars..TXG_FOB_USD., Import = Goods..Value.of.Imports..Cost..Insurance..Freight..CIF...US.Dollars..TMG_CIF_USD., 'Trade Balance' = Goods..Value.of.Trade.Balance..US.Dollars..TBG_USD.) %>%
+  dplyr::select(-Country.Code, -Counterpart.Country.Code, -Status, -Status.1, -Status.2, -X, -Goods..Value.of.Imports..Free.on.board..FOB...US.Dollars..TMG_FOB_USD., -Status.3) %>% 
+  mutate(Total.Trade.Flow = ifelse(is.na(Export) & is.na(Import), NA, coalesce(Export, 0) + coalesce(Import, 0)))
+
+tv_data$ccode1 <- as.numeric(tv_data$ccode1)
+tv_data$ccode2 <- as.numeric(tv_data$ccode2)
+
+tv_data <- left_join(tv_data, deflator, by = c("ccode1", "year")) %>%
+  filter(!is.na(Total.Trade.Flow) & !is.na(deflator)) %>%
+  mutate(Total.Trade.Flow = Total.Trade.Flow/deflator*100)
+  
+tv_test <- tv_data %>%
+  filter(ccode1 %in% c(2,365), ccode2 %in% c(2,365), year == 1992)
+```
+
+```{r}
+#Create tv_reg_df with lagged average trade volume growth rate
+tv_reg_df <- tv_data %>%
+  arrange(ccode1, ccode2, year) %>%
+  group_by(ccode1, ccode2) %>%
+  mutate(growth_rate = (Total.Trade.Flow / lag(Total.Trade.Flow) - 1) * 100) %>%
+  mutate(three_year_avg_growth = (growth_rate + lag(growth_rate) + lag(growth_rate, 2)) / 3) %>%
+  mutate(lagged_tv_growth = lag(three_year_avg_growth)) %>%
+  ungroup()
+  
+  
+tv_test <- tv_reg_df %>%
+  filter(ccode1 %in% c(2,20), ccode2 %in% c(2,20))
+  
+```
+
+```{r}
+#Create Regression df_reg
+
+#Merge Datasets
+df_reg <- left_join(df, tv_reg_df, by = c('ccode1', 'ccode2', 'year'))
+
+df_reg <- df_reg %>%
+  filter(!is.na(Total.Trade.Flow)) %>%
+  mutate(trade_share = Total.Trade.Flow/GDP1*100)
+
+df_reg <- df_reg %>%
+  mutate(year_0 = year - 1950)
+
+
+
+library(dplyr)
+library(tidyr)
+
+# Step 1: Create a dataframe of country codes that are part of any trade agreement in a given year
+countries_in_rta <- df_reg %>%
+  filter(ta_dummy == 1) %>%
+  select(year, ccode1, ccode2) %>%
+  gather(key = "country_role", value = "country_code", ccode1, ccode2) %>%
+  distinct(year, country_code)
+
+# Step 2: Create the td_dummy column based on the specified conditions
+df_reg1 <- df_reg %>%
+  group_by(year) %>%
+  mutate(
+    rta_countries = list(countries_in_rta %>% filter(year == first(year)) %>% pull(country_code))
+  ) %>%
+  rowwise() %>%
+  mutate(
+    is_rta_country1 = ccode1 %in% rta_countries[[1]],
+    is_rta_country2 = ccode2 %in% rta_countries[[1]],
+    td_dummy = case_when(
+      ta_dummy == 1 ~ 0,
+      !is_rta_country1 & !is_rta_country2 ~ 0,
+      is_rta_country1 & is_rta_country2 & ta_dummy == 0 ~ 1,
+      is_rta_country1 != is_rta_country2 ~ 1,
+      TRUE ~ 0
+    )
+  ) %>%
+  ungroup() %>%
+  select(-rta_countries, -is_rta_country1, -is_rta_country2)
+```
+
+```{r}
+#Fixed Effects Regressions
+
+#With trade variables
+reg_fe1 <- feols(log(IdealPointDistance) ~ ta_dummy + log(Total.Trade.Flow) + three_year_avg_growth + trade_share | country_pair + ccode1_time + ccode2_time, data = df_reg)
+
+summary(reg_fe1)
+
+#Without trade varaibles
+reg_fe2 <- feols(log(IdealPointDistance) ~ ta_dummy | country_pair + ccode1_time + ccode2_time, data = df)
+
+summary(reg_fe2)
+
+#With trade flow on LHS
+reg_fe2 <- feols(log(Total.Trade.Flow) ~ ta_dummy +  td_dummy | country_pair + ccode1_time + ccode2_time, data = df_reg1)
+
+summary(reg_fe2)
+
+#Only with trade on RHS
+reg_fe3 <- feols(log(IdealPointDistance) ~ log(Total.Trade.Flow) + three_year_avg_growth + trade_share | country_pair + ccode1_time + ccode2_time, data = df_reg)
+
+summary(reg_fe3)
+```
+
+```{r}
+#Lead and Lag Regression without trade
+df_reg <- df_reg %>%
+  mutate(ta_dummy1 = ifelse(year == first_ta_year, 1, 0))
+
+#Regression for anticipatory effects
+df_reg_anticipatory <- df_reg %>%
+  arrange(ccode1, ccode2, year) %>%
+  group_by(ccode1, ccode2) %>%
+  mutate(
+    ta_dummy_lead1 = lead(ta_dummy1, 1),
+    ta_dummy_lead2 = lead(ta_dummy1, 2),
+    ta_dummy_lead3 = lead(ta_dummy1, 3),
+    ta_dummy_lead4 = lead(ta_dummy1, 4),
+    ta_dummy_lead5 = lead(ta_dummy1, 5),
+    ta_dummy_lead6 = lead(ta_dummy1, 6),
+    ta_dummy_lead7 = lead(ta_dummy1, 7),
+    ta_dummy_lead8 = lead(ta_dummy1, 8),
+    ta_dummy_lead9 = lead(ta_dummy1, 9),
+    ta_dummy_lead10 = lead(ta_dummy1, 10),
+    ta_dummy_lag1 = lag(ta_dummy1, 1),
+    ta_dummy_lag2 = lag(ta_dummy1, 2),
+    ta_dummy_lag3 = lag(ta_dummy1, 3),
+    ta_dummy_lag4 = lag(ta_dummy1, 4),
+    ta_dummy_lag5 = lag(ta_dummy1, 5),
+    ta_dummy_lag6 = lag(ta_dummy1, 6),
+    ta_dummy_lag7 = lag(ta_dummy1, 7),
+    ta_dummy_lag8 = lag(ta_dummy1, 8),
+    ta_dummy_lag9 = lag(ta_dummy1, 9),
+    ta_dummy_lag10 = lag(ta_dummy1, 10)
+  ) %>%
+  ungroup()
+
+# Replace NA values in forward-lagged variables with 0
+df_reg_anticipatory <- df_reg_anticipatory %>%
+  mutate(
+    ta_dummy_lead1 = replace_na(ta_dummy_lead1, 0),
+    ta_dummy_lead2 = replace_na(ta_dummy_lead2, 0),
+    ta_dummy_lead3 = replace_na(ta_dummy_lead3, 0),
+    ta_dummy_lead4 = replace_na(ta_dummy_lead4, 0),
+    ta_dummy_lead5 = replace_na(ta_dummy_lead5, 0),
+    ta_dummy_lead6 = replace_na(ta_dummy_lead6, 0),
+    ta_dummy_lead7 = replace_na(ta_dummy_lead7, 0),
+    ta_dummy_lead8 = replace_na(ta_dummy_lead8, 0),
+    ta_dummy_lead9 = replace_na(ta_dummy_lead9, 0),
+    ta_dummy_lead10 = replace_na(ta_dummy_lead10, 0),
+    ta_dummy_lag1 = replace_na(ta_dummy_lag1, 0),
+    ta_dummy_lag2 = replace_na(ta_dummy_lag2, 0),
+    ta_dummy_lag3 = replace_na(ta_dummy_lag3, 0),
+    ta_dummy_lag4 = replace_na(ta_dummy_lag4, 0),
+    ta_dummy_lag5 = replace_na(ta_dummy_lag5, 0),
+    ta_dummy_lag6 = replace_na(ta_dummy_lag6, 0),
+    ta_dummy_lag7 = replace_na(ta_dummy_lag7, 0),
+    ta_dummy_lag8 = replace_na(ta_dummy_lag8, 0),
+    ta_dummy_lag9 = replace_na(ta_dummy_lag9, 0),
+    ta_dummy_lag10 = replace_na(ta_dummy_lag10, 0)
+  )
+
+df_reg_anticipatory <- df_reg_anticipatory %>%
+  mutate(dummy_greater_than_10 = ifelse(centered_year > 10, 1, 0),
+    dummy_less_than_minus_10 = ifelse(centered_year < -10, 1, 0))
+
+# Run the regression model
+reg_anticipatory <- feols(log(IdealPointDistance) ~ log(Total.Trade.Flow) + three_year_avg_growth + dummy_less_than_minus_10 +  dummy_greater_than_10 + ta_dummy1 + ta_dummy_lead1 + ta_dummy_lead2 + ta_dummy_lead3 + ta_dummy_lead4 +ta_dummy_lead5 + ta_dummy_lag1 + ta_dummy_lag2 + ta_dummy_lag3 + ta_dummy_lag4 + ta_dummy_lag5| country_pair + ccode1_time + ccode2_time , data = df_reg_anticipatory)
+
+
+summary(reg_anticipatory)
+
+```
+
+```{r}
+#Lead and Lag Regression without trade
+df <- df %>%
+  mutate(ta_dummy1 = ifelse(year == first_ta_year, 1, 0))
+
+#Regression for anticipatory effects
+df_reg_anticipatory1 <- df%>%
+  arrange(ccode1, ccode2, year) %>%
+  group_by(ccode1, ccode2) %>%
+  mutate(
+    ta_dummy_lead1 = lead(ta_dummy1, 1),
+    ta_dummy_lead2 = lead(ta_dummy1, 2),
+    ta_dummy_lead3 = lead(ta_dummy1, 3),
+    ta_dummy_lead4 = lead(ta_dummy1, 4),
+    ta_dummy_lead5 = lead(ta_dummy1, 5),
+    ta_dummy_lead6 = lead(ta_dummy1, 6),
+    ta_dummy_lead7 = lead(ta_dummy1, 7),
+    ta_dummy_lead8 = lead(ta_dummy1, 8),
+    ta_dummy_lead9 = lead(ta_dummy1, 9),
+    ta_dummy_lead10 = lead(ta_dummy1, 10),
+    ta_dummy_lag1 = lag(ta_dummy1, 1),
+    ta_dummy_lag2 = lag(ta_dummy1, 2),
+    ta_dummy_lag3 = lag(ta_dummy1, 3),
+    ta_dummy_lag4 = lag(ta_dummy1, 4),
+    ta_dummy_lag5 = lag(ta_dummy1, 5),
+    ta_dummy_lag6 = lag(ta_dummy1, 6),
+    ta_dummy_lag7 = lag(ta_dummy1, 7),
+    ta_dummy_lag8 = lag(ta_dummy1, 8),
+    ta_dummy_lag9 = lag(ta_dummy1, 9),
+    ta_dummy_lag10 = lag(ta_dummy1, 10)
+  ) %>%
+  ungroup()
+
+# Replace NA values in forward-lagged variables with 0
+df_reg_anticipatory1 <- df_reg_anticipatory1 %>%
+  mutate(
+    ta_dummy_lead1 = replace_na(ta_dummy_lead1, 0),
+    ta_dummy_lead2 = replace_na(ta_dummy_lead2, 0),
+    ta_dummy_lead3 = replace_na(ta_dummy_lead3, 0),
+    ta_dummy_lead4 = replace_na(ta_dummy_lead4, 0),
+    ta_dummy_lead5 = replace_na(ta_dummy_lead5, 0),
+    ta_dummy_lead6 = replace_na(ta_dummy_lead6, 0),
+    ta_dummy_lead7 = replace_na(ta_dummy_lead7, 0),
+    ta_dummy_lead8 = replace_na(ta_dummy_lead8, 0),
+    ta_dummy_lead9 = replace_na(ta_dummy_lead9, 0),
+    ta_dummy_lead10 = replace_na(ta_dummy_lead10, 0),
+    ta_dummy_lag1 = replace_na(ta_dummy_lag1, 0),
+    ta_dummy_lag2 = replace_na(ta_dummy_lag2, 0),
+    ta_dummy_lag3 = replace_na(ta_dummy_lag3, 0),
+    ta_dummy_lag4 = replace_na(ta_dummy_lag4, 0),
+    ta_dummy_lag5 = replace_na(ta_dummy_lag5, 0),
+    ta_dummy_lag6 = replace_na(ta_dummy_lag6, 0),
+    ta_dummy_lag7 = replace_na(ta_dummy_lag7, 0),
+    ta_dummy_lag8 = replace_na(ta_dummy_lag8, 0),
+    ta_dummy_lag9 = replace_na(ta_dummy_lag9, 0),
+    ta_dummy_lag10 = replace_na(ta_dummy_lag10, 0)
+  )
+
+df_reg_anticipatory1 <- df_reg_anticipatory1 %>%
+  mutate(dummy_greater_than_10 = ifelse(centered_year > 10, 1, 0),
+    dummy_less_than_minus_10 = ifelse(centered_year < -10, 1, 0))
+
+df_reg_anticipatory1 <- df_reg_anticipatory1 %>% 
+  mutate(cons = 1)
+
+# Run the regression model
+reg_anticipatory1 <- feols(log(IdealPointDistance) ~  dummy_less_than_minus_10 +  dummy_greater_than_10 + ta_dummy1 + ta_dummy_lead2 + ta_dummy_lead3 + ta_dummy_lead4 +ta_dummy_lead5 + ta_dummy_lead6 + ta_dummy_lead7 + ta_dummy_lead8 + ta_dummy_lead9 + ta_dummy_lead10 + ta_dummy_lag1 + ta_dummy_lag2 + ta_dummy_lag3 + ta_dummy_lag4 + ta_dummy_lag5+ ta_dummy_lag6 + ta_dummy_lag7 + ta_dummy_lag8 + ta_dummy_lag9 + ta_dummy_lag10 + cons| country_pair + ccode1_time + ccode2_time , data = df_reg_anticipatory1)
+
+ summary(reg_anticipatory1)
+
+# Create a dataframe from the coefficients matrix
+results_df <- data.frame(
+  Term = rownames(summary_reg$coeftable),
+  Estimate = round(summary_reg$coeftable[, "Estimate"], 4),
+  Std_Error = round(summary_reg$coeftable[, "Std. Error"], 4),
+  t_value = round(summary_reg$coeftable[, "t value"], 4),
+  p_value = format.pval(summary_reg$coeftable[, "Pr(>|t|)"], digits = 4)
+)
+
+# Print the dataframe
+print(results_df)
+```
+
+```{r}
+# Extract coefficients and standard errors from the regression table
+coefficients <- c(
+  ta_dummy_lead1 = -0.0359,
+  ta_dummy_lead2 = -0.0244,
+  ta_dummy_lead3 = 0.1096,
+  ta_dummy_lead4 = 0.1659,
+  ta_dummy_lead5 = 0.2158,
+  ta_dummy_lead6 = 0.2477,
+  ta_dummy_lead7 = 0.2832,
+  ta_dummy_lead8 = 0.3123,
+  ta_dummy_lead9 = 0.2850,
+  ta_dummy_lead10 = 0.2983,
+  ta_dummy_lag1 = -0.0926,
+  ta_dummy_lag2 = -0.1206,
+  ta_dummy_lag3 = -0.1885,
+  ta_dummy_lag4 = -0.1524,
+  ta_dummy_lag5 = -0.2238,
+  ta_dummy_lag6 = -0.1582,
+  ta_dummy_lag7 = -0.1694,
+  ta_dummy_lag8 = -0.1206,
+  ta_dummy_lag9 = -0.1749,
+  ta_dummy_lag10 = -0.1582
+)
+
+standard_errors <- c(
+  ta_dummy_lead1 = 0.0188,
+  ta_dummy_lead2 = 0.0181,
+  ta_dummy_lead3 = 0.0198,
+  ta_dummy_lead4 = 0.0210,
+  ta_dummy_lead5 = 0.0212,
+  ta_dummy_lead6 = 0.0221,
+  ta_dummy_lead7 = 0.0217,
+  ta_dummy_lead8 = 0.0224,
+  ta_dummy_lead9 = 0.0238,
+  ta_dummy_lead10 = 0.0226,
+  ta_dummy_lag1 = 0.0177,
+  ta_dummy_lag2 = 0.0187,
+  ta_dummy_lag3 = 0.0196,
+  ta_dummy_lag4 = 0.0191,
+  ta_dummy_lag5 = 0.0208,
+  ta_dummy_lag6 = 0.0218,
+  ta_dummy_lag7 = 0.0225,
+  ta_dummy_lag8 = 0.0227,
+  ta_dummy_lag9 = 0.0227,
+  ta_dummy_lag10 = 0.0233
+)
+
+# Calculate t-statistics and significance stars
+t_stats <- coefficients / standard_errors
+significance <- cut(abs(t_stats), breaks = c(-Inf, 1.65, 1.96, 2.58, Inf), 
+                    labels = c("", "*", "**", "***"))
+
+# Create a data frame for plotting
+plot_data <- data.frame(
+  Year = c(-10:-1, 0, 1:10),
+  Coefficient = c(
+    coefficients["ta_dummy_lead10"],
+    coefficients["ta_dummy_lead9"],
+    coefficients["ta_dummy_lead8"],
+    coefficients["ta_dummy_lead7"],
+    coefficients["ta_dummy_lead6"],
+    coefficients["ta_dummy_lead5"],
+    coefficients["ta_dummy_lead4"],
+    coefficients["ta_dummy_lead3"],
+    coefficients["ta_dummy_lead2"],
+    coefficients["ta_dummy_lead1"],
+    0, # Year 0
+    coefficients["ta_dummy_lag1"],
+    coefficients["ta_dummy_lag2"],
+    coefficients["ta_dummy_lag3"],
+    coefficients["ta_dummy_lag4"],
+    coefficients["ta_dummy_lag5"],
+    coefficients["ta_dummy_lag6"],
+    coefficients["ta_dummy_lag7"],
+    coefficients["ta_dummy_lag8"],
+    coefficients["ta_dummy_lag9"],
+    coefficients["ta_dummy_lag10"]
+  ),
+  SE = c(
+    standard_errors["ta_dummy_lead10"],
+    standard_errors["ta_dummy_lead9"],
+    standard_errors["ta_dummy_lead8"],
+    standard_errors["ta_dummy_lead7"],
+    standard_errors["ta_dummy_lead6"],
+    standard_errors["ta_dummy_lead5"],
+    standard_errors["ta_dummy_lead4"],
+    standard_errors["ta_dummy_lead3"],
+    standard_errors["ta_dummy_lead2"],
+    standard_errors["ta_dummy_lead1"],
+    0, # Year 0
+    standard_errors["ta_dummy_lag1"],
+    standard_errors["ta_dummy_lag2"],
+    standard_errors["ta_dummy_lag3"],
+    standard_errors["ta_dummy_lag4"],
+    standard_errors["ta_dummy_lag5"],
+    standard_errors["ta_dummy_lag6"],
+    standard_errors["ta_dummy_lag7"],
+    standard_errors["ta_dummy_lag8"],
+    standard_errors["ta_dummy_lag9"],
+    standard_errors["ta_dummy_lag10"]
+  ),
+  Significance = c(
+    significance["ta_dummy_lead10"],
+    significance["ta_dummy_lead9"],
+    significance["ta_dummy_lead8"],
+    significance["ta_dummy_lead7"],
+    significance["ta_dummy_lead6"],
+    significance["ta_dummy_lead5"],
+    significance["ta_dummy_lead4"],
+    significance["ta_dummy_lead3"],
+    significance["ta_dummy_lead2"],
+    significance["ta_dummy_lead1"],
+    "", # Year 0
+    significance["ta_dummy_lag1"],
+    significance["ta_dummy_lag2"],
+    significance["ta_dummy_lag3"],
+    significance["ta_dummy_lag4"],
+    significance["ta_dummy_lag5"],
+    significance["ta_dummy_lag6"],
+    significance["ta_dummy_lag7"],
+    significance["ta_dummy_lag8"],
+    significance["ta_dummy_lag9"],
+    significance["ta_dummy_lag10"]
+  )
+)
+
+library(ggplot2)
+
+# Create the coefficient plot using ggplot2
+ggplot(plot_data, aes(x = Year, y = Coefficient)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Coefficient - 1.96 * SE, ymax = Coefficient + 1.96 * SE), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_text(aes(label = Significance), vjust = -1) +
+  labs(title = "Coefficient Plot with Leads and Lags",
+       x = "Year",
+       y = "Coefficient") +
+  theme_minimal()
+
+```
+
+
+```{r}
+#Piecewise Regression
+
+library(dplyr)
+library(ggplot2)
+library(segmented)
+
+# Extract coefficients and standard errors from the regression table
+coefficients <- c(
+  ta_dummy_lead1 = -0.0359,
+  ta_dummy_lead2 = -0.0244,
+  ta_dummy_lead3 = 0.1096,
+  ta_dummy_lead4 = 0.1659,
+  ta_dummy_lead5 = 0.2158,
+  ta_dummy_lead6 = 0.2477,
+  ta_dummy_lead7 = 0.2832,
+  ta_dummy_lead8 = 0.3123,
+  ta_dummy_lead9 = 0.2850,
+  ta_dummy_lead10 = 0.2983,
+  ta_dummy_lag1 = -0.0926,
+  ta_dummy_lag2 = -0.1206,
+  ta_dummy_lag3 = -0.1885,
+  ta_dummy_lag4 = -0.1524,
+  ta_dummy_lag5 = -0.2238,
+  ta_dummy_lag6 = -0.1582,
+  ta_dummy_lag7 = -0.1694,
+  ta_dummy_lag8 = -0.1206,
+  ta_dummy_lag9 = -0.1749,
+  ta_dummy_lag10 = -0.1582
+)
+
+standard_errors <- c(
+  ta_dummy_lead1 = 0.0188,
+  ta_dummy_lead2 = 0.0181,
+  ta_dummy_lead3 = 0.0198,
+  ta_dummy_lead4 = 0.0210,
+  ta_dummy_lead5 = 0.0212,
+  ta_dummy_lead6 = 0.0221,
+  ta_dummy_lead7 = 0.0217,
+  ta_dummy_lead8 = 0.0224,
+  ta_dummy_lead9 = 0.0238,
+  ta_dummy_lead10 = 0.0226,
+  ta_dummy_lag1 = 0.0177,
+  ta_dummy_lag2 = 0.0187,
+  ta_dummy_lag3 = 0.0196,
+  ta_dummy_lag4 = 0.0191,
+  ta_dummy_lag5 = 0.0208,
+  ta_dummy_lag6 = 0.0218,
+  ta_dummy_lag7 = 0.0225,
+  ta_dummy_lag8 = 0.0227,
+  ta_dummy_lag9 = 0.0227,
+  ta_dummy_lag10 = 0.0233
+)
+
+# Create a data frame for the coefficients and standard errors
+plot_data <- data.frame(
+  Year = c(-10:-1, 0, 1:10),
+  Coefficient = c(
+    coefficients["ta_dummy_lead10"],
+    coefficients["ta_dummy_lead9"],
+    coefficients["ta_dummy_lead8"],
+    coefficients["ta_dummy_lead7"],
+    coefficients["ta_dummy_lead6"],
+    coefficients["ta_dummy_lead5"],
+    coefficients["ta_dummy_lead4"],
+    coefficients["ta_dummy_lead3"],
+    coefficients["ta_dummy_lead2"],
+    coefficients["ta_dummy_lead1"],
+    0, # Year 0
+    coefficients["ta_dummy_lag1"],
+    coefficients["ta_dummy_lag2"],
+    coefficients["ta_dummy_lag3"],
+    coefficients["ta_dummy_lag4"],
+    coefficients["ta_dummy_lag5"],
+    coefficients["ta_dummy_lag6"],
+    coefficients["ta_dummy_lag7"],
+    coefficients["ta_dummy_lag8"],
+    coefficients["ta_dummy_lag9"],
+    coefficients["ta_dummy_lag10"]
+  ),
+  SE = c(
+    standard_errors["ta_dummy_lead10"],
+    standard_errors["ta_dummy_lead9"],
+    standard_errors["ta_dummy_lead8"],
+    standard_errors["ta_dummy_lead7"],
+    standard_errors["ta_dummy_lead6"],
+    standard_errors["ta_dummy_lead5"],
+    standard_errors["ta_dummy_lead4"],
+    standard_errors["ta_dummy_lead3"],
+    standard_errors["ta_dummy_lead2"],
+    standard_errors["ta_dummy_lead1"],
+    0, # Year 0
+    standard_errors["ta_dummy_lag1"],
+    standard_errors["ta_dummy_lag2"],
+    standard_errors["ta_dummy_lag3"],
+    standard_errors["ta_dummy_lag4"],
+    standard_errors["ta_dummy_lag5"],
+    standard_errors["ta_dummy_lag6"],
+    standard_errors["ta_dummy_lag7"],
+    standard_errors["ta_dummy_lag8"],
+    standard_errors["ta_dummy_lag9"],
+    standard_errors["ta_dummy_lag10"]
+  )
+)
+
+lm_model <- lm(Coefficient ~ Year, data = plot_data)
+segmented_model <- segmented(lm_model, seg.Z = ~Year, psi = 0)
+
+# Extract the fitted values and breakpoints
+plot_data$Fitted <- fitted(segmented_model)
+breakpoints <- segmented_model$psi[, "Est."]
+
+# Plot
+ggplot(plot_data, aes(x = Year, y = Coefficient)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Coefficient - 1.96 * SE, ymax = Coefficient + 1.96 * SE), width = 0.2) +
+  geom_line(aes(y = Fitted), color = "blue") +
+  geom_vline(xintercept = breakpoints, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Piecewise Regression with Leads and Lags",
+       x = "Year",
+       y = "Coefficient") +
+  theme_minimal()
+
+print(breakpoints)
+
+```
+```{r}
+#De-Trend
+
+library(dplyr)
+library(ggplot2)
+
+# Extract coefficients and standard errors from the regression table
+coefficients <- c(
+  ta_dummy_lead1 = -0.0359,
+  ta_dummy_lead2 = -0.0244,
+  ta_dummy_lead3 = 0.1096,
+  ta_dummy_lead4 = 0.1659,
+  ta_dummy_lead5 = 0.2158,
+  ta_dummy_lead6 = 0.2477,
+  ta_dummy_lead7 = 0.2832,
+  ta_dummy_lead8 = 0.3123,
+  ta_dummy_lead9 = 0.2850,
+  ta_dummy_lead10 = 0.2983,
+  ta_dummy_lag1 = -0.0926,
+  ta_dummy_lag2 = -0.1206,
+  ta_dummy_lag3 = -0.1885,
+  ta_dummy_lag4 = -0.1524,
+  ta_dummy_lag5 = -0.2238,
+  ta_dummy_lag6 = -0.1582,
+  ta_dummy_lag7 = -0.1694,
+  ta_dummy_lag8 = -0.1206,
+  ta_dummy_lag9 = -0.1749,
+  ta_dummy_lag10 = -0.1582
+)
+
+standard_errors <- c(
+  ta_dummy_lead1 = 0.0188,
+  ta_dummy_lead2 = 0.0181,
+  ta_dummy_lead3 = 0.0198,
+  ta_dummy_lead4 = 0.0210,
+  ta_dummy_lead5 = 0.0212,
+  ta_dummy_lead6 = 0.0221,
+  ta_dummy_lead7 = 0.0217,
+  ta_dummy_lead8 = 0.0224,
+  ta_dummy_lead9 = 0.0238,
+  ta_dummy_lead10 = 0.0226,
+  ta_dummy_lag1 = 0.0177,
+  ta_dummy_lag2 = 0.0187,
+  ta_dummy_lag3 = 0.0196,
+  ta_dummy_lag4 = 0.0191,
+  ta_dummy_lag5 = 0.0208,
+  ta_dummy_lag6 = 0.0218,
+  ta_dummy_lag7 = 0.0225,
+  ta_dummy_lag8 = 0.0227,
+  ta_dummy_lag9 = 0.0227,
+  ta_dummy_lag10 = 0.0233
+)
+
+# Create a data frame for the coefficients and standard errors
+plot_data <- data.frame(
+  Year = c(-10:-1, 0, 1:10),
+  Coefficient = c(
+    coefficients["ta_dummy_lead10"],
+    coefficients["ta_dummy_lead9"],
+    coefficients["ta_dummy_lead8"],
+    coefficients["ta_dummy_lead7"],
+    coefficients["ta_dummy_lead6"],
+    coefficients["ta_dummy_lead5"],
+    coefficients["ta_dummy_lead4"],
+    coefficients["ta_dummy_lead3"],
+    coefficients["ta_dummy_lead2"],
+    coefficients["ta_dummy_lead1"],
+    0, # Year 0
+    coefficients["ta_dummy_lag1"],
+    coefficients["ta_dummy_lag2"],
+    coefficients["ta_dummy_lag3"],
+    coefficients["ta_dummy_lag4"],
+    coefficients["ta_dummy_lag5"],
+    coefficients["ta_dummy_lag6"],
+    coefficients["ta_dummy_lag7"],
+    coefficients["ta_dummy_lag8"],
+    coefficients["ta_dummy_lag9"],
+    coefficients["ta_dummy_lag10"]
+  ),
+  SE = c(
+    standard_errors["ta_dummy_lead10"],
+    standard_errors["ta_dummy_lead9"],
+    standard_errors["ta_dummy_lead8"],
+    standard_errors["ta_dummy_lead7"],
+    standard_errors["ta_dummy_lead6"],
+    standard_errors["ta_dummy_lead5"],
+    standard_errors["ta_dummy_lead4"],
+    standard_errors["ta_dummy_lead3"],
+    standard_errors["ta_dummy_lead2"],
+    standard_errors["ta_dummy_lead1"],
+    0, # Year 0
+    standard_errors["ta_dummy_lag1"],
+    standard_errors["ta_dummy_lag2"],
+    standard_errors["ta_dummy_lag3"],
+    standard_errors["ta_dummy_lag4"],
+    standard_errors["ta_dummy_lag5"],
+    standard_errors["ta_dummy_lag6"],
+    standard_errors["ta_dummy_lag7"],
+    standard_errors["ta_dummy_lag8"],
+    standard_errors["ta_dummy_lag9"],
+    standard_errors["ta_dummy_lag10"]
+  )
+)
+
+pre_pta_data <- plot_data %>% filter(Year < 0)
+trend_model <- lm(Coefficient ~ Year, data = pre_pta_data)
+
+# Predict the trend for all years
+plot_data$Trend <- predict(trend_model, newdata = plot_data)
+
+# De-trend the coefficients
+plot_data$Detrended_Coefficient <- plot_data$Coefficient - plot_data$Trend
+
+# Plot
+ggplot(plot_data, aes(x = Year, y = Detrended_Coefficient)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Detrended_Coefficient - 1.96 * SE, ymax = Detrended_Coefficient + 1.96 * SE), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "De-Trended Coefficient Plot with Leads and Lags",
+       x = "Year",
+       y = "De-Trended Coefficient") +
+  theme_minimal()
+
+
+
+```
+
+
+
+
+```{r}
+#Trade on LHS
+reg_anticipatory2 <- feols(log(Total.Trade.Flow) ~ dummy_less_than_minus_10 +  dummy_greater_than_10 + ta_dummy_lead1 + ta_dummy_lead2 + ta_dummy_lead3 + ta_dummy_lead4 +ta_dummy_lead5 + ta_dummy_lead6 + ta_dummy_lead7 + ta_dummy_lead8 + ta_dummy_lead9 + ta_dummy_lead10 + ta_dummy_lag1 + ta_dummy_lag2 + ta_dummy_lag3 + ta_dummy_lag4 + ta_dummy_lag5 + ta_dummy_lag6 + ta_dummy_lag7 + ta_dummy_lag8 + ta_dummy_lag9 + ta_dummy_lag10| country_pair + ccode1_time + ccode2_time , data = df_reg_anticipatory)
+
+
+ summary_reg <- summary(reg_anticipatory2)
+
+
+# Extract coefficients and standard errors from the regression table
+coefficients <- c(
+  ta_dummy_lead1 = 0.0464,
+  ta_dummy_lead2 = -0.0101,
+  ta_dummy_lead3 = -0.0375,
+  ta_dummy_lead4 = -0.0302,
+  ta_dummy_lead5 = -0.0437,
+  ta_dummy_lead6 = -0.0580,
+  ta_dummy_lead7 = -0.0914,
+  ta_dummy_lead8 = -0.0976,
+  ta_dummy_lead9 = -0.0887,
+  ta_dummy_lead10 = -0.1527,
+  ta_dummy_lag1 = 0.1155,
+  ta_dummy_lag2 = 0.1284,
+  ta_dummy_lag3 = 0.1473,
+  ta_dummy_lag4 = 0.1436,
+  ta_dummy_lag5 = 0.1526,
+  ta_dummy_lag6 = 0.1661,
+  ta_dummy_lag7 = 0.1827,
+  ta_dummy_lag8 = 0.1803,
+  ta_dummy_lag9 = 0.1799,
+  ta_dummy_lag10 = 0.1451
+)
+
+standard_errors <- c(
+  ta_dummy_lead1 = 0.0296,
+  ta_dummy_lead2 = 0.0334,
+  ta_dummy_lead3 = 0.0321,
+  ta_dummy_lead4 = 0.0354,
+  ta_dummy_lead5 = 0.0360,
+  ta_dummy_lead6 = 0.0374,
+  ta_dummy_lead7 = 0.0399,
+  ta_dummy_lead8 = 0.0415,
+  ta_dummy_lead9 = 0.0419,
+  ta_dummy_lead10 = 0.0444,
+  ta_dummy_lag1 = 0.0272,
+  ta_dummy_lag2 = 0.0282,
+  ta_dummy_lag3 = 0.0288,
+  ta_dummy_lag4 = 0.0281,
+  ta_dummy_lag5 = 0.0294,
+  ta_dummy_lag6 = 0.0301,
+  ta_dummy_lag7 = 0.0303,
+  ta_dummy_lag8 = 0.0302,
+  ta_dummy_lag9 = 0.0324,
+  ta_dummy_lag10 = 0.0317
+)
+
+# Calculate t-statistics and significance stars
+t_stats <- coefficients / standard_errors
+significance <- cut(abs(t_stats), breaks = c(-Inf, 1.65, 1.96, 2.58, Inf), 
+                    labels = c("", "*", "**", "***"))
+
+# Create a data frame for plotting
+plot_data <- data.frame(
+  Year = c(-10:-1, 0, 1:10),
+  Coefficient = c(
+    coefficients["ta_dummy_lead10"],
+    coefficients["ta_dummy_lead9"],
+    coefficients["ta_dummy_lead8"],
+    coefficients["ta_dummy_lead7"],
+    coefficients["ta_dummy_lead6"],
+    coefficients["ta_dummy_lead5"],
+    coefficients["ta_dummy_lead4"],
+    coefficients["ta_dummy_lead3"],
+    coefficients["ta_dummy_lead2"],
+    coefficients["ta_dummy_lead1"],
+    0, # Year 0
+    coefficients["ta_dummy_lag1"],
+    coefficients["ta_dummy_lag2"],
+    coefficients["ta_dummy_lag3"],
+    coefficients["ta_dummy_lag4"],
+    coefficients["ta_dummy_lag5"],
+    coefficients["ta_dummy_lag6"],
+    coefficients["ta_dummy_lag7"],
+    coefficients["ta_dummy_lag8"],
+    coefficients["ta_dummy_lag9"],
+    coefficients["ta_dummy_lag10"]
+  ),
+  SE = c(
+    standard_errors["ta_dummy_lead10"],
+    standard_errors["ta_dummy_lead9"],
+    standard_errors["ta_dummy_lead8"],
+    standard_errors["ta_dummy_lead7"],
+    standard_errors["ta_dummy_lead6"],
+    standard_errors["ta_dummy_lead5"],
+    standard_errors["ta_dummy_lead4"],
+    standard_errors["ta_dummy_lead3"],
+    standard_errors["ta_dummy_lead2"],
+    standard_errors["ta_dummy_lead1"],
+    0, # Year 0
+    standard_errors["ta_dummy_lag1"],
+    standard_errors["ta_dummy_lag2"],
+    standard_errors["ta_dummy_lag3"],
+    standard_errors["ta_dummy_lag4"],
+    standard_errors["ta_dummy_lag5"],
+    standard_errors["ta_dummy_lag6"],
+    standard_errors["ta_dummy_lag7"],
+    standard_errors["ta_dummy_lag8"],
+    standard_errors["ta_dummy_lag9"],
+    standard_errors["ta_dummy_lag10"]
+  ),
+  Significance = c(
+    significance["ta_dummy_lead10"],
+    significance["ta_dummy_lead9"],
+    significance["ta_dummy_lead8"],
+    significance["ta_dummy_lead7"],
+    significance["ta_dummy_lead6"],
+    significance["ta_dummy_lead5"],
+    significance["ta_dummy_lead4"],
+    significance["ta_dummy_lead3"],
+    significance["ta_dummy_lead2"],
+    significance["ta_dummy_lead1"],
+    "", # Year 0
+    significance["ta_dummy_lag1"],
+    significance["ta_dummy_lag2"],
+    significance["ta_dummy_lag3"],
+    significance["ta_dummy_lag4"],
+    significance["ta_dummy_lag5"],
+    significance["ta_dummy_lag6"],
+    significance["ta_dummy_lag7"],
+    significance["ta_dummy_lag8"],
+    significance["ta_dummy_lag9"],
+    significance["ta_dummy_lag10"]
+  )
+)
+
+library(ggplot2)
+
+# Create the coefficient plot using ggplot2
+ggplot(plot_data, aes(x = Year, y = Coefficient)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Coefficient - 1.96 * SE, ymax = Coefficient + 1.96 * SE), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_text(aes(label = Significance), vjust = -1) +
+  labs(title = "Coefficient Plot with Leads and Lags",
+       x = "Year",
+       y = "Coefficient") +
+  theme_minimal()
+```
+
+```{r}
+#Run different regressions based on dyad_category
+advanced_economies <- data.frame(
+  ccode = c(232, 900, 305, 211, 20, 344, 352, 316, 390, 366, 375, 220, 255, 350, 395, 205, 666, 325, 740, 730, 367, 368, 212, 338, 210, 920, 385, 235, 331, 830, 317, 349, 230, 380, 225, 200, 2),
+  economy_class = 1)
+
+df_rp <- df %>%
+  left_join(advanced_economies, by = c("ccode1" = "ccode")) %>%
+  rename(development_status1 = economy_class) %>%
+  left_join(advanced_economies, by = c("ccode2" = "ccode")) %>%
+  rename(development_status2 = economy_class)
+
+df_rp <- df_rp %>%
+  mutate(development_status1 = ifelse(is.na(development_status1), 0, development_status1), development_status2 = ifelse(is.na(development_status2), 0, development_status2))
+
+# Create dyad_category
+df_rp <- df_rp %>%
+  mutate(dyad_category = case_when(
+    development_status1 == 1 & development_status2 == 1 ~ "advanced-advanced",
+    development_status1 == 0 & development_status2 == 0 ~ "emerging-emerging",
+    TRUE ~ "advanced-emerging"
+  )) %>%
+  select(-development_status1, -development_status2)
+
+df_reg_country_category <- df_rp %>%
+  mutate(ad_ad = ifelse(dyad_category == "advanced-advanced", 1, 0),
+         ad_em = ifelse(dyad_category == "advanced-emerging", 1, 0),
+         em_em = ifelse(dyad_category == "emerging-emerging", 1, 0))
+
+reg_cc <- feols(log(IdealPointDistance) ~ 
+                  ta_dummy:ad_ad + ta_dummy:ad_em + ta_dummy:em_em | 
+                  country_pair + ccode1_time + ccode2_time, 
+                data = df_reg_country_category)
+
+
+summary(reg_cc)
+```
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+
+# Assuming df_reg has columns: year, GDP1, GDP2
+# Calculate the top 20% and bottom 20% thresholds for each year
+gdp_thresholds <- df %>%
+  gather(key = "GDP_type", value = "GDP", GDP1, GDP2) %>%
+  group_by(year) %>%
+  summarize(
+    top_20 = quantile(GDP, 0.70, na.rm = TRUE),
+    bottom_20 = quantile(GDP, 0.30, na.rm = TRUE)
+  )# Merge the thresholds back to the original dataframe
+df_bs <- left_join(df, gdp_thresholds, by = "year")
+
+# Categorize each GDP
+df_bs <- df_bs %>%
+  mutate(
+    category1 = case_when(
+      GDP1 >= top_20 ~ "big",
+      GDP1 <= bottom_20 ~ "small",
+      TRUE ~ "medium"
+    ),
+    category2 = case_when(
+      GDP2 >= top_20 ~ "big",
+      GDP2 <= bottom_20 ~ "small",
+      TRUE ~ "medium"
+    )
+  )
+
+# Define the overall category based on the categories of the two countries
+df_bs <- df_bs %>%
+  mutate(
+    pair_category = case_when(
+      category1 == "big" & category2 == "big" ~ "big-big",
+      category1 == "small" & category2 == "small" ~ "small-small",
+      (category1 == "big" & category2 == "small") | (category1 == "small" & category2 == "big") ~ "big-small",
+      TRUE ~ NA_character_
+    )
+  )
+
+# View the resulting dataframe
+print(df_reg)
+
+df_reg_country_category <- df_bs %>%
+  mutate(
+    big_big = ifelse(pair_category == "big-big", 1, 0),
+    small_small = ifelse(pair_category == "small-small", 1, 0),
+    big_small = ifelse(pair_category == "big-small", 1, 0),
+    big_big = ifelse(is.na(big_big), 0, big_big),
+    small_small = ifelse(is.na(small_small), 0, small_small),
+    big_small = ifelse(is.na(big_small), 0, big_small)
+  )
+
+reg_cc <- feols(log(IdealPointDistance) ~ 
+                  ta_dummy:big_big + ta_dummy:big_small + ta_dummy:small_small | 
+                  country_pair + ccode1_time + ccode2_time, 
+                data = df_reg_country_category)
+
+summary(reg_cc)
+```
+
+```{r}
+#df_reg with categories
+df_reg <- left_join(df_reg_country_category, tv_reg_df, by = c('ccode1', 'ccode2', 'year'))
+
+df_reg <- df_reg %>%
+  filter(!is.na(Total.Trade.Flow)) %>%
+  mutate(trade_share = Total.Trade.Flow/GDP1*100)
+```
+
+```{r}
+df_reg_period1 <- df_reg %>%
+  filter(year >= 1950 & year < 1960)
+
+reg_fe_period1 <- feols(log(Total.Trade.Flow) ~ ta_dummy | country_pair + ccode1_time + ccode2_time, data = df_reg_period1)
+
+summary(reg_fe_period1)
+
+#2, 0, 0
+df_test <- df_reg_period3 %>%
+  filter(ta_dummy == 1 & big_big == 1) %>%
+  mutate(pair = pmap_chr(list(ccode1, ccode2), ~ paste(sort(c(...)), collapse = "-"))) %>%
+  distinct(pair)
+
+df_reg_period2 <- df_reg %>%
+  filter(year > 2000)
+
+reg_fe_period2 <- feols(log(Total.Trade.Flow) ~ ta_dummy | country_pair + ccode1_time + ccode2_time, data = df_reg_period2)
+
+summary(reg_fe_period2)
+#535, 204, 169
+
+df_reg_period3 <- df_reg %>%
+  filter(year >= 1960 & year <= 2000)
+
+reg_fe_period3 <- feols(log(Total.Trade.Flow) ~ ta_dummy | country_pair + ccode1_time + ccode2_time, data = df_reg_period3)
+
+summary(reg_fe_period3)
+#266, 54, 28
+
+df_filtered <- df %>%
+  filter(year == 2022) %>%
+  distinct(ccode2)
+```
+
+```{r}
+library(countrycode)
+
+# Define EU membership with country names
+eu_membership_names <- list(
+  "1957" = c("Belgium", "France", "Germany", "Italy", "Luxembourg", "Netherlands"),
+  "1973" = c("Denmark", "Ireland", "UK"),
+  "1981" = c("Greece"), 
+  "1986" = c("Portugal", "Spain"), 
+  "1995" = c("Austria", "Finland", "Sweden"), 
+  "2004" = c("Cyprus", "Czech Republic", "Estonia", "Hungary", "Latvia", "Lithuania", "Malta", "Poland", "Slovak Republic", "Slovenia"),
+  "2007" = c("Bulgaria", "Romania"),  
+  "2013" = c("Croatia")
+)
+
+# Convert country names to country codes
+eu_membership <- lapply(eu_membership_names, function(countries) {
+  countrycode(countries, "country.name", "cown")
+})
+
+# Initial EU bloc (1957 members)
+initial_eu_bloc <- eu_membership[["1957"]]
+
+# Function to get new EU members for a given year
+get_new_eu_members <- function(year) {
+  new_members <- c()
+  for (y in names(eu_membership)) {
+    if (as.numeric(y) == year) {
+      new_members <- c(new_members, eu_membership[[y]])
+    }
+  }
+  return(new_members)
+}
+
+# Initialize vectors to store results
+mean_ideal_distance <- numeric(21)
+
+# Loop through each year relative to joining year (-13 to +13)
+for (i in -10:10) {
+  yearly_distances <- c()
+  
+  # Loop through each joining year and calculate distances
+  for (joining_year in names(eu_membership)[-1]) {  # Exclude initial bloc
+    joining_year <- as.numeric(joining_year)
+    new_members <- get_new_eu_members(joining_year)
+    
+    # Filter data for the relevant years and countries
+    filtered_data <- df %>%
+      filter(year == (joining_year + i)) %>%
+      filter(ccode1 %in% new_members) %>%
+      filter(ccode2 %in% initial_eu_bloc)
+    
+    # Calculate mean ideal distance for the year
+    yearly_distances <- c(yearly_distances, mean(filtered_data$IdealPointDistance, na.rm = TRUE))
+  }
+  
+  # Store the mean ideal distance for the centered year
+  mean_ideal_distance[i + 11] <- mean(yearly_distances, na.rm = TRUE)
+}
+
+# Create a data frame for plotting
+plot_df_eu <- data.frame(x = -10:10, y = mean_ideal_distance)
+
+library(ggplot2)
+
+# Plot the mean ideal distance over time
+ggplot(plot_df_eu, aes(x = x, y = y)) +
+  geom_line(color = 'blue') +
+  theme_minimal() +
+  labs(x = "Centered Year", y = "Mean Ideal Point Distance", 
+       title = "New EU Members vs. Existing EU Bloc") +
+  theme(legend.title = element_blank())
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Assuming df_reg_country_category is your dataframe and it has the necessary columns
+
+# Filter the data for the relevant range of centered years (-10 to 10)
+filtered_data <- df_reg_country_category %>%
+  filter(centered_year >= -10 & centered_year <= 10)
+
+# Calculate the average ideal distance for each category and centered year
+avg_ideal_distance <- filtered_data %>%
+  group_by(centered_year, category = case_when(
+    big_big == 1 ~ "big_big",
+    big_small == 1 ~ "big_small",
+    small_small == 1 ~ "small_small"
+  )) %>%
+  summarise(avg_ideal_distance = mean(IdealPointDistance, na.rm = TRUE)) %>%
+  ungroup() %>%
+  filter(!is.na(category))  # Remove NA categories
+
+# Calculate the average slope for each category
+avg_slopes <- avg_ideal_distance %>%
+  group_by(category) %>%
+  summarise(avg_slope = mean(diff(avg_ideal_distance) / diff(centered_year), na.rm = TRUE))
+
+# Print the average slopes
+print(avg_slopes)
+
+# Plot the results
+ggplot(avg_ideal_distance, aes(x = centered_year, y = avg_ideal_distance, color = category)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Average Ideal Distance by Category Around Centered Year",
+       x = "Centered Year",
+       y = "Average Ideal Distance",
+       color = "Category") +
+  scale_x_continuous(breaks = seq(-10, 10, by = 1)) +
+  theme(legend.title = element_blank())
+
+
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# Assuming df_reg_country_category is your dataframe and it has the necessary columns
+
+# Filter the data for the relevant range of centered years (-20 to 20)
+filtered_data <- df_reg_country_category %>%
+  filter(centered_year >= -20 & centered_year <= 20)
+
+# Identify complete country pairs (ccode1, ccode2) that have data for all years in the range
+complete_pairs <- filtered_data %>%
+  group_by(ccode1, ccode2) %>%
+  filter(n_distinct(centered_year) == 41) %>%  # 41 years from -20 to 20
+  ungroup() %>%
+  dplyr::select(ccode1, ccode2) %>%
+  distinct()
+
+# Filter out incomplete country pairs
+balanced_data <- filtered_data %>%
+  inner_join(complete_pairs, by = c("ccode1", "ccode2"))
+
+# Calculate the average ideal distance for each category and centered year
+avg_ideal_distance <- balanced_data %>%
+  group_by(centered_year, category = case_when(
+    big_big == 1 ~ "big_big",
+    big_small == 1 ~ "big_small",
+    small_small == 1 ~ "small_small",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(category)) %>%  # Remove NA lines
+  summarise(avg_ideal_distance = mean(IdealPointDistance, na.rm = TRUE)) %>%
+  ungroup()
+
+# De-trend the lines in the pre-period (years -20 to -1) for each category individually
+detrended_data <- avg_ideal_distance %>%
+  group_by(category) %>%
+  do({
+    pre_pta_data <- filter(., centered_year < 0)
+    trend_model <- lm(avg_ideal_distance ~ centered_year, data = pre_pta_data)
+    trend <- predict(trend_model, newdata = .)
+    data.frame(centered_year = .$centered_year, 
+               avg_ideal_distance = .$avg_ideal_distance, 
+               trend = trend, 
+               detrended_avg_ideal_distance = .$avg_ideal_distance - trend)
+  }) %>%
+  ungroup()
+
+# Plot the de-trended results
+ggplot(detrended_data, aes(x = centered_year, y = detrended_avg_ideal_distance, color = category)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "De-Trended Average Ideal Distance by Category",
+       x = "Centered Year",
+       y = "De-Trended Average Ideal Distance",
+       color = "Category") +
+  scale_x_continuous(breaks = seq(-20, 20, by = 1)) +
+  theme(legend.title = element_blank())
+
+
+
+
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# Assuming df_reg_country_category is your dataframe and it has the necessary columns
+
+# Filter the data for the relevant range of centered years (-10 to 10)
+filtered_data <- df_reg_country_category %>%
+  filter(centered_year >= -10 & centered_year <= 10)
+
+# Identify complete country pairs (ccode1, ccode2) that have data for all years in the range
+complete_pairs <- filtered_data %>%
+  group_by(ccode1, ccode2) %>%
+  filter(n_distinct(centered_year) == 21) %>%  # 21 years from -10 to 10
+  ungroup() %>%
+  dplyr::select(ccode1, ccode2) %>%
+  distinct()
+
+# Filter out incomplete country pairs
+balanced_data <- filtered_data %>%
+  inner_join(complete_pairs, by = c("ccode1", "ccode2"))
+
+# Calculate the average ideal distance for each category and centered year
+avg_ideal_distance <- balanced_data %>%
+  group_by(centered_year, category = case_when(
+    big_big == 1 ~ "big_big",
+    big_small == 1 ~ "big_small",
+    small_small == 1 ~ "small_small",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(category)) %>%  # Remove NA lines
+  summarise(avg_ideal_distance = mean(IdealPointDistance, na.rm = TRUE)) %>%
+  ungroup()
+
+# De-trend the lines in the post-period (years 0 to 10) for each category individually
+detrended_data <- avg_ideal_distance %>%
+  group_by(category) %>%
+  do({
+    post_pta_data <- filter(., centered_year >= 0)
+    if (nrow(post_pta_data) > 0) {
+      trend_model <- lm(avg_ideal_distance ~ centered_year, data = post_pta_data)
+      trend <- predict(trend_model, newdata = .)
+    } else {
+      trend <- rep(NA, nrow(.))
+    }
+    data.frame(centered_year = .$centered_year, 
+               avg_ideal_distance = .$avg_ideal_distance, 
+               trend = trend, 
+               detrended_avg_ideal_distance = .$avg_ideal_distance - trend)
+  }) %>%
+  ungroup()
+
+# Plot the de-trended results
+ggplot(detrended_data, aes(x = centered_year, y = detrended_avg_ideal_distance, color = category)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "De-Trended Average Ideal Distance by Category ",
+       x = "Centered Year",
+       y = "De-Trended Average Ideal Distance",
+       color = "Category") +
+  scale_x_continuous(breaks = seq(-10, 10, by = 1)) +
+  theme(legend.title = element_blank())
+
+
+
+
+```
+
+
+```{r}
+#Withdrawing from PTA
+
+library(dplyr)
+library(ggplot2)
+
+#Identify country pairs and the year when they lost their trade agreement
+lost_trade_agreement <- df %>%
+  arrange(ccode1, ccode2, year) %>%
+  group_by(ccode1, ccode2) %>%
+  mutate(previous_ta_dummy = lag(ta_dummy)) %>%
+  filter(previous_ta_dummy == 1 & ta_dummy == 0) %>%
+  ungroup() %>%
+  dplyr::select(ccode1, ccode2, year) %>%
+  rename(loss_year = year)
+
+centered_df <- df %>%
+  inner_join(lost_trade_agreement, by = c("ccode1", "ccode2")) %>%
+  mutate(centered_year = year - loss_year) %>%
+  filter(centered_year >= -5 & centered_year <= 5) %>%
+  filter(!(ccode1 %in% c(640, 652) & centered_year == -4)) %>%
+  mutate(pre_dummy = ifelse(centered_year < -1, 1, 0),
+         post_dummy = ifelse(centered_year > -1, 1, 0)) %>%
+  mutate(country_pair = paste(ccode1, ccode2, sep = "_"),
+         ccode1_time = paste(ccode1, year, sep = "_"),
+         ccode2_time = paste(ccode2, year, sep = "_")) %>%
+  dplyr::select(ccode1, ccode2, year, centered_year, IdealPointDistance, pre_dummy, post_dummy, country_pair, ccode1_time, ccode2_time)
+
+#Calculate mean ideal distances for each centered year
+mean_ideal_distances <- centered_df %>%
+  group_by(centered_year) %>%
+  summarise(mean_ideal_distance = mean(IdealPointDistance, na.rm = TRUE))
+
+# Print the mean ideal distances
+print(mean_ideal_distances)
+
+
+
+library(ggplot2)
+
+# Create a dataframe with the provided values
+manual_data <- data.frame(
+  centered_year = c(-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5),
+  mean_ideal_distance = c(0.4557336, 0.3716326, 0.4589470, 0.5592273, 0.4357534, 0.7351211, 0.6505620, 0.5961179, 0.6680330, 0.5824344, 0.6146464)
+)
+
+# Plot the values
+ggplot(manual_data, aes(x = centered_year, y = mean_ideal_distance)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  theme_minimal() +
+  labs(title = "Mean Ideal Distances Around Loss of Trade Agreement",
+       x = "Years Since Loss of Trade Agreement",
+       y = "Mean Ideal Distance") +
+  theme(plot.title = element_text(hjust = 1))
+
+reg_withdrawl <- feols(log(IdealPointDistance) ~ pre_dummy + post_dummy | country_pair, data = centered_df)
+
+summary(reg_withdrawl)
+
+df_test <- centered_df %>%
+  filter(centered_year == 7)
+
+
+
+
+
+```
