@@ -1,0 +1,419 @@
+---
+title: "ECON 3750 Project"
+author: "Leyton Xing"
+date: "2024-03-12"
+output: html_document
+---
+
+```{r}
+# imports
+library(tidyverse)
+library(boot)
+library(MASS)
+library(e1071)
+library(class)
+library(leaps)
+library(glmnet)
+library(tree)
+library(randomForest)
+```
+
+```{r}
+df <- read.csv('melb_data.csv')
+df <- na.omit(df)
+df <- subset(df, select=c(-Address, -Method))
+df$Date <- as.Date(df$Date, format='%d/%m/%Y')
+
+# remove qualitative predictors with less than or equal to 3 unique observations
+df <- df %>% group_by(Suburb) %>% filter(n() > 100) %>% ungroup()
+df <- df %>% group_by(SellerG) %>% filter(n() > 25) %>% ungroup()
+df <- df %>% group_by(CouncilArea) %>% filter(n() > 50) %>% ungroup()
+head(df)
+```
+
+## Preliminary Regression Analysis
+**Validation Set Approach Setup**
+```{r, warnings=FALSE}
+# Validation Set Approach
+sample <- sample(nrow(df)*0.75)
+train <- df[sample, ]
+test <- df[-sample, ]
+
+lm.fit <- lm(Price ~ . -Postcode -CouncilArea-Lattitude-Longtitude-Regionname-Suburb, data=train)
+summary(lm.fit)
+mse <- mean((test$Price - predict(lm.fit, test))^2)
+mse
+```
+
+**Drop Distance, Postcode, Landsize, CouncilArea, Longitude, RegionName, PropertyCount**
+```{r}
+lm.fit <- lm(Price ~ . -Distance -Postcode -Landsize -CouncilArea -Longtitude -Regionname -Propertycount, data=train)
+summary(lm.fit)
+mse <- mean((test$Price - predict(lm.fit, test))^2)
+mse
+```
+
+**Drop SellerG, Distance, Postcode, Landsize, CouncilArea, Longitude, RegionName, PropertyCount**
+```{r}
+lm.fit <- lm(Price ~ . -SellerG -Distance -Postcode -Landsize -CouncilArea -Longtitude -Regionname -Propertycount, data=train)
+summary(lm.fit)
+mse <- mean((test$Price - predict(lm.fit, test))^2)
+mse
+```
+
+**Figure 1**
+```{r}
+summary(lm.fit)
+mse <- mean((test$Price - predict(lm.fit, test))^2)
+mse
+```
+
+**Bootstrap for "Drop SellerG, Distance, Postcode, Landsize, CouncilArea, Longitude, RegionName, PropertyCount"**
+```{r}
+# bootstrap
+boot.fn <- function(data, index)
+  coef(lm(Price ~ . -SellerG -Distance -Postcode -Landsize -CouncilArea -Longtitude -Regionname -Propertycount, data = data, subset = index))
+
+for(i in 1:10){
+  boot.fn(df, sample(nrow(df), nrow(df), replace = T))
+}
+
+boot(df, boot.fn, 1000)
+summary(lm(Price ~ . -SellerG -Distance -Postcode -Landsize -CouncilArea -Longtitude -Regionname -Propertycount, data = df, subset = sample))$coef
+```
+
+## Preliminary Classification Analysis
+```{r}
+# validation set approach setup
+res <- quantile(df$Price, probs = c(0,0.25,0.5,0.75,1)) 
+res
+
+q3 <- res[4]
+df$HighP <- ifelse(df$Price >= q3, 1, 0)
+train$HighP <- ifelse(train$Price >= q3, 1, 0)
+test$HighP <- ifelse(test$Price >= q3, 1, 0)
+```
+
+**Logistic Regression, Drop "NA" and quantitative variables**
+```{r, warning=FALSE}
+glm.fit <- glm(HighP ~ . -Date -Distance -Postcode -Landsize -BuildingArea -CouncilArea -Lattitude -Longtitude -Regionname -Propertycount, data=train, family=binomial)
+summary(glm.fit)
+
+glm.probs <- predict(glm.fit, data=test, type = "response")
+glm.pred <- factor(ifelse(predict(glm.fit, test, type = "response") > 0.5, "Up", "Down"))
+
+table(glm.pred, test$HighP)
+
+# Success Rate
+mean(ifelse(glm.pred == "Up", 1, 0) == test$HighP)
+```
+
+**Logistic Regression, Drop CouncilArea**
+```{r, warning=FALSE}
+glm.fit <- glm(HighP ~ . -Suburb -SellerG -Date -Distance -Postcode -Landsize -BuildingArea -CouncilArea -Lattitude -Longtitude -Regionname -Propertycount, data=train, family=binomial)
+summary(glm.fit)
+
+glm.probs <- predict(glm.fit, data=test, type = "response")
+glm.probs.logit <- predict(glm.fit)
+
+glm.pred <- factor(ifelse(predict(glm.fit, test, type = "response") > 0.5, "Up", "Down"))
+
+table(glm.pred, test$HighP)
+
+# Success Rate
+mean(ifelse(glm.pred == "Up", 1, 0) == test$HighP)
+```
+
+**LDA**
+```{r}
+lda.fit <- lda(HighP ~ . -Price -SellerG -Distance -Postcode -Landsize -CouncilArea -Lattitude -Longtitude -Regionname -Propertycount, data=train)
+lda.fit
+plot(lda.fit)
+
+lda.pred <- predict(lda.fit, newdata=test)
+lda.class <- lda.pred$class
+
+table(lda.class, test$HighP)
+mean(lda.class == test$HighP)
+```
+
+**Bootstrap for LDA**
+```{r}
+# bootstrap
+boot.fn <- function(data, index)
+  coef(lda(HighP ~ . -Price -SellerG -Distance -Postcode -Landsize -CouncilArea -Lattitude -Longtitude -Regionname -Propertycount, data = data, subset = index))
+
+for(i in 1:10){
+  boot.fn(df, sample(nrow(df), nrow(df), replace = T))
+}
+
+boot(df, boot.fn, 1000)
+```
+
+**QDA**
+```{r}
+qda.fit <- qda(HighP ~ Rooms + Date + Bathroom + Car + BuildingArea + YearBuilt + Bedroom2, data=train)
+qda.fit
+
+qda.pred <- predict(qda.fit, newdata=test)
+qda.class <- qda.pred$class
+
+table(qda.class, test$HighP)
+mean(qda.class == test$HighP)
+```
+
+**Naive Bayes**
+```{r}
+nb.fit <- naiveBayes(HighP ~ . -Price -SellerG -Distance -Postcode -Landsize -CouncilArea -Longtitude -Regionname -Propertycount, data=train)
+nb.fit
+
+nb.class <- predict(nb.fit, newdata=test)
+
+table(nb.class, test$HighP)
+mean(nb.class == test$HighP)
+```
+
+**KNN**
+```{r}
+X <- cbind(scale(as.numeric(df$Rooms)), scale(as.numeric(df$Date)), scale(as.numeric(df$Bathroom)), scale(as.numeric(df$Car)), scale(as.numeric(df$BuildingArea)), scale(as.numeric(df$YearBuilt)))
+  train.X <- X[sample,]
+  test.X <- X[-sample,]
+
+acc <- rep(0, 20)
+axis_k <- seq(1, 20)
+
+for(k in 1:20){
+  knn.pred <- knn(train.X, test.X, df$HighP[sample], k = k)
+  acc[k] <- mean(knn.pred == test$HighP)
+}
+
+plot(axis_k, acc)
+best_acc <- which.max(acc)
+best_acc
+knn.pred <- knn(train.X, test.X, df$HighP[sample], k = axis_k[best_acc])
+table(knn.pred, test$HighP)
+mean(knn.pred == test$HighP)
+```
+
+
+## Further Investigation
+**Linear Model Selection**
+```{r}
+# Forward Stepwise Selection using regsubsets
+regfit.fwd <- regsubsets(Price ~ . -HighP, data=train, nvmax=ncol(df), method='forward')
+fwd.summary <- summary(regfit.fwd)
+fwd.summary
+
+plot(fwd.summary$rss, xlab = "Number of Variables", ylab = "RSS", type = "l")
+plot(fwd.summary$adjr2, xlab = "Number of Variables",
+     ylab = "Adjusted RSq", type = "l")
+pt <- which.max(fwd.summary$adjr2)
+pt
+points(pt, fwd.summary$adjr2[pt], col = "red", cex = 2, pch=20)
+
+plot(fwd.summary$cp, xlab = "Number of Variables",
+     ylab = "Cp", type = "l")
+pt <- which.min(fwd.summary$cp)
+pt
+points(pt, fwd.summary$cp[pt], col = "red", cex = 2, pch=20)
+
+plot(fwd.summary$bic, xlab = "Number of Variables",
+     ylab = "BIC", type = "l")
+pt <- which.min(fwd.summary$bic)
+pt
+points(pt, fwd.summary$bic[pt], col = "red", cex = 2, pch=20)
+
+coef(regfit.fwd, pt)
+
+test.mat <- model.matrix(Price ~ . -HighP, data=test)
+mse <- rep(NA, 20)
+for(i in 1:20) {
+  coefi <- coef(regfit.fwd, id = i)
+  pred <- test.mat[, names(coefi)] %*% coefi
+  mse[i] <- mean((test$Price - pred)^2)
+}
+plot(1:20, mse)
+min <- which.min(mse)
+min
+mse[min]
+```
+
+```{r}
+# Backward Stepwise Selection using regsubsets
+regfit.bwd <- regsubsets(Price ~ ., data=train, nvmax=ncol(df), method='backward')
+bwd.summary <- summary(regfit.bwd)
+bwd.summary
+
+plot(bwd.summary$rss, xlab = "Number of Variables", ylab = "RSS", type = "l")
+plot(bwd.summary$adjr2, xlab = "Number of Variables",
+     ylab = "Adjusted RSq", type = "l")
+pt <- which.max(bwd.summary$adjr2)
+pt
+points(pt, bwd.summary$adjr2[pt], col = "red", cex = 2, pch=20)
+
+plot(bwd.summary$cp, xlab = "Number of Variables",
+     ylab = "Cp", type = "l")
+pt <- which.min(bwd.summary$cp)
+pt
+points(pt, bwd.summary$cp[pt], col = "red", cex = 2, pch=20)
+
+plot(bwd.summary$bic, xlab = "Number of Variables",
+     ylab = "BIC", type = "l")
+pt <- which.min(bwd.summary$bic)
+pt
+points(pt, bwd.summary$bic[pt], col = "red", cex = 2, pch=20)
+coef(regfit.bwd, 19)
+
+test.mat <- model.matrix(Price ~ ., data=test)
+mse <- rep(NA, 20)
+for(i in 1:20) {
+  coefi <- coef(regfit.bwd, id = i)
+  pred <- test.mat[, names(coefi)] %*% coefi
+  mse[i] <- mean((test$Price - pred)^2)
+}
+plot(1:20, mse)
+min <- which.min(mse)
+min
+mse[min]
+```
+
+**Regularization**
+Ridge Regression
+```{r}
+train.x <- model.matrix(Price ~ . -HighP, train)[, -1]
+test.x <- model.matrix(Price ~ . -HighP, test)[, -1]
+y <- df$Price
+
+grid <- 10^seq(10, -2, length = 100)
+ridge.mod <- glmnet(train.x, train$Price, alpha = 0, lambda = grid, thresh = 1e-12)
+summary(ridge.mod)
+
+# CV for best lambda in ridge
+cv.ridge <- cv.glmnet(train.x, train$Price, alpha = 0, lambda = grid, thresh = 1e-12)
+plot(cv.ridge)
+bestlam <- cv.ridge$lambda.min
+bestlam
+
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = test.x)
+mse <- mean((ridge.pred - test$Price)^2)
+mse
+
+coef(ridge.mod)
+```
+
+Lasso Regression
+```{r}
+train.x <- model.matrix(Price ~ . -HighP, train)[, -1]
+test.x <- model.matrix(Price ~ . -HighP, test)[, -1]
+y <- df$Price
+
+grid <- 10^seq(10, -2, length = 100)
+lasso.mod <- glmnet(train.x, train$Price, alpha = 1, lambda = grid, thresh = 1e-12)
+summary(lasso.mod)
+
+# CV for best lambda in lasso
+cv.lasso <- cv.glmnet(train.x, train$Price, alpha = 1, lambda = grid, thresh = 1e-12)
+plot(cv.lasso)
+bestlam <- cv.lasso$lambda.min
+bestlam
+
+ridge.pred <- predict(lasso.mod, s = bestlam, newx = test.x)
+mse <- mean((ridge.pred - test$Price)^2)
+mse
+```
+
+**Tree-based Methods**
+\\**Decision Tree (Regression)**
+```{r}
+tree <- tree(Price ~ . -HighP, data=train)
+summary(tree)
+plot(tree)
+text(tree, pretty = 0)
+
+yhat <- predict(tree, newdata = test)
+mse <- mean((yhat - test$Price)^2)
+mse
+
+# CV Tree
+cv <- cv.tree(tree)
+plot(cv$size, cv$dev, type = "b")
+best <- cv$size[which.min(cv$dev)]
+best
+
+# Prune tree
+prune <- prune.tree(tree, best = best)
+plot(prune)
+text(prune, pretty = 0)
+
+yhat <- predict(prune, newdata = test)
+mse <- mean((yhat - test$Price)^2)
+mse
+```
+
+**Random Forest (Regression)**
+```{r}
+bag <- randomForest(Price ~ . -HighP, data = train, mtry = ncol(train)-1, importance = TRUE)
+bag
+
+yhat.bag <- predict(bag, newdata = test)
+plot(yhat.bag, test$Price)
+abline(0, 1)
+mse <- mean((yhat.bag - test$Price)^2)
+mse
+importance(bag)
+
+bag <- randomForest(Price ~ . -HighP, data = train, mtry = ncol(train)-1, ntree=500, importance = TRUE)
+yhat.bag <- predict(bag, newdata = test)
+mse <- mean((yhat.bag - test$Price)^2)
+mse
+importance(bag)
+```
+
+**Decision Tree (Classification)**
+```{r}
+tree <- tree(as.factor(HighP) ~ . -Price, data=train)
+summary(tree)
+plot(tree)
+text(tree, pretty = 0)
+
+yhat <- predict(tree, test, type='class')
+acc <- mean(yhat == test$HighP)
+acc
+
+# CV Tree
+cv <- cv.tree(tree, FUN = prune.misclass)
+plot(cv$size, cv$dev, type = "b")
+best <- cv$size[which.min(cv$dev)]
+best
+
+# Prune tree
+prune <- prune.misclass(tree, best = best)
+plot(prune)
+text(prune, pretty = 0)
+yhat <- predict(prune, test, type='class')
+
+table(yhat, test$HighP)
+acc <- mean(yhat == test$HighP)
+acc
+```
+
+**Random Forest (Classification)**
+```{r}
+bag <- randomForest(as.factor(HighP) ~ . -Price, data = train, mtry = ncol(train)-1, importance = TRUE)
+bag
+
+yhat.bag <- predict(bag, test, type='class')
+plot(yhat.bag, test$Price)
+abline(0, 1)
+acc <- mean(yhat.bag == test$HighP)
+acc
+importance(bag)
+
+bag <- randomForest(as.factor(HighP) ~ . -Price, data = train, mtry = ncol(train)-1, ntree=500, importance = TRUE)
+yhat.bag <- predict(bag, test, type='class')
+
+table(yhat.bag, test$HighP)
+acc <- mean(yhat.bag == test$HighP)
+acc
+importance(bag)
+```
